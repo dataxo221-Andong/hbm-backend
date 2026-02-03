@@ -483,11 +483,11 @@ def analyze_wafer(lot_name):
                 "batchId": batch_id,
                 "result": {
                     "failure_type": wafer_data['failure_type'],
-                    "totalGrade": wafer_data['total_grade'],
-                    "defectDensity": wafer_data['defect_density'],
-                    "dieCount": len(chip_list), 
-                    "waferMapUrl": wafer_data['wafer_map'],
-                    "firebaseUrl": wafer_data['img_url']
+                    "total_grade": wafer_data['total_grade'],
+                    "defect_density": wafer_data['defect_density'],
+                    "die_count": wafer_data['die_count'],
+                    "defect_count": wafer_data['defect_count'],
+                    "img_url": wafer_data['img_url']
                 }
             }), 200
 
@@ -517,6 +517,58 @@ def get_wafer_result(lot_name):
             return jsonify({"error": "Not found"}), 404
             
         return jsonify(result), 200
+    finally:
+        cur.close()
+        conn.close()
+
+@wafer_bp.route("/total_status", methods=["GET"])
+def get_total_status():
+    """
+    [대시보드] 전체 통계 조회 (수정됨)
+    - 총 분석 웨이퍼 = wafer_data 행 수
+    - 추출 가능한 칩 수 = SUM(die_count) from wafer_data
+    - 불량 칩 수 = SUM(defect_count) from wafer_data
+    - 결함 밀도 = (불량 칩 수 / 추출 가능한 칩 수) * 100
+    """
+    conn = get_conn()
+    cur = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        # 1. 총 웨이퍼 수
+        cur.execute("SELECT COUNT(*) as cnt FROM wafer_data")
+        res_wafer = cur.fetchone()
+        total_wafers = res_wafer['cnt'] if res_wafer else 0
+
+        # 2. 칩 통계 (wafer_data 집계)
+        cur.execute("SELECT SUM(die_count) as total_die, SUM(defect_count) as total_defect FROM wafer_data")
+        row = cur.fetchone()
+        
+        # DB 디버깅용 로그
+        print(f"[DEBUG] /total_status Query Result: {row}")
+
+        # None 체크 및 타입 변환 (Decimal 호환성)
+        # pymysql에서 SUM 결과는 Decimal로 반환될 수 있음 -> float/int 변환 필요
+        total_die_val = row['total_die'] if row and row['total_die'] is not None else 0
+        total_defect_val = row['total_defect'] if row and row['total_defect'] is not None else 0
+        
+        total_die = float(total_die_val)
+        total_defect = float(total_defect_val)
+        
+        # 결함 밀도 계산
+        defect_density = (total_defect / total_die * 100) if total_die > 0 else 0.0
+        
+        result = {
+            "totalWafers": total_wafers,
+            "totalDie": int(total_die),
+            "defectCount": int(total_defect),
+            "defectDensity": round(defect_density, 2)
+        }
+        print(f"[DEBUG] /total_status Response: {result}")
+        
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"[Error] /total_status: {e}")
+        return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
         conn.close()
