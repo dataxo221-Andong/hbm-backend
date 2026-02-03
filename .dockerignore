@@ -1,0 +1,36 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesize
+
+# Environment variables
+.env
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+package.json
+
+# Runtime Data & Temp
+temp_images/
+models/*_chips.pkl
+models/BATCH_*.pkl
