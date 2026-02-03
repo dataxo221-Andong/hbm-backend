@@ -521,6 +521,47 @@ def get_wafer_result(lot_name):
         cur.close()
         conn.close()
 
+@wafer_bp.route("/list", methods=["GET"])
+def get_wafer_list():
+    """
+    [4단계] 웨이퍼 목록 조회 (페이지네이션)
+    """
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 20))
+    offset = (page - 1) * limit
+    
+    conn = get_conn()
+    cur = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        # 1. 전체 개수 조회
+        cur.execute("SELECT COUNT(*) as cnt FROM wafer_data")
+        total_res = cur.fetchone()
+        total_count = total_res['cnt'] if total_res else 0
+        
+        # 2. 데이터 조회
+        query = """
+            SELECT lot_name, failure_type, die_count, defect_count, defect_density, total_grade, created_at 
+            FROM wafer_data 
+            ORDER BY created_at DESC 
+            LIMIT %s OFFSET %s
+        """
+        cur.execute(query, (limit, offset))
+        rows = cur.fetchall()
+        
+        return jsonify({
+            "wafers": rows,
+            "total": total_count,
+            "page": page,
+            "limit": limit
+        }), 200
+        
+    except Exception as e:
+        print(f"[Error] /list: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
 @wafer_bp.route("/total_status", methods=["GET"])
 def get_total_status():
     """
