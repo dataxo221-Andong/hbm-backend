@@ -418,3 +418,105 @@ def analyze_stack():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@stack_bp.route("/list", methods=["GET"])
+def list_history():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # tsv_num 별로 그룹화하여 가장 최근 시간과 스택 수 조회
+        sql = """
+            SELECT tsv_num, MAX(created_at) as created_at, COUNT(DISTINCT group_number) as stack_count 
+            FROM grouped_data 
+            GROUP BY tsv_num 
+            ORDER BY tsv_num DESC
+        """
+        cur.execute(sql)
+        rows = cur.fetchall()
+        
+        history = []
+        for r in rows:
+            if isinstance(r, dict):
+                history.append(r)
+            else:
+                history.append({
+                    "tsv_num": r[0],
+                    "created_at": str(r[1]),
+                    "stack_count": r[2]
+                })
+        return jsonify(history)
+    except Exception as e:
+        print(f"[List Error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@stack_bp.route("/result/<int:tsv_num>", methods=["GET"])
+def get_result(tsv_num):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        sql = """
+            SELECT group_number, position_in_group, chip_uid, failure_type, die_status
+            FROM grouped_data
+            WHERE tsv_num = %s
+            ORDER BY group_number, position_in_group
+        """
+        cur.execute(sql, (tsv_num,))
+        rows = cur.fetchall()
+        
+        stacks_map = {}
+        for r in rows:
+            if isinstance(r, dict):
+                g_num = r['group_number']
+                pos = r['position_in_group']
+                uid = r['chip_uid']
+                ftype = r['failure_type']
+                dstatus = r['die_status']
+            else:
+                g_num = r[0]
+                pos = r[1]
+                uid = r[2]
+                ftype = r[3]
+                dstatus = r[4]
+            
+            if g_num not in stacks_map:
+                stacks_map[g_num] = []
+            
+            # die_status 처리
+            try:
+                ds = int(float(dstatus)) if dstatus else 1 # Default 1 if missing in DB
+            except:
+                ds = 1
+
+            layer = {
+                "layer_idx": pos,
+                "chip_id": uid,
+                "cluster_label": -1,
+                "mapped_type": ftype,
+                "failure_type": ftype,
+                "die_status": ds
+            }
+            stacks_map[g_num].append(layer)
+
+        stacks_result = []
+        for g_num in sorted(stacks_map.keys()):
+            layers = stacks_map[g_num]
+            stacks_result.append({
+                "stack_id": f"STACK_DB_{tsv_num}_{g_num}",
+                "score": "Loaded",
+                "layers": layers
+            })
+            
+        return jsonify({
+            "batch_id": f"DB_LOAD_{tsv_num}",
+            "stacks": stacks_result
+        })
+
+    except Exception as e:
+        print(f"[Result Error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
