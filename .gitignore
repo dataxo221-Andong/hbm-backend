@@ -3,3 +3,5 @@ wafer-firebase-key.json
 .env
 .env.local
 .env.*.local
+__pycache__/
+*.pyc
