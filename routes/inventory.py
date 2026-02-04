@@ -3,7 +3,7 @@ import pymysql
 
 from db import get_conn
 
-chip_bp = Blueprint("chip", __name__)
+inventory_bp = Blueprint("inventory", __name__, url_prefix="/inventory")
 
 
 def _parse_int(value, default=None, min_value=None, max_value=None):
@@ -80,22 +80,17 @@ def _fetch_one_chip(where_sql, params):
         conn.close()
 
 
-@chip_bp.route("/chips", methods=["GET"])
-@chip_bp.route("/chips/list", methods=["GET"])
-@chip_bp.route("/inventory/chips", methods=["GET"])
-@chip_bp.route("/wafer/chips", methods=["GET"])
+@inventory_bp.route("/chips", methods=["GET"])
 def list_chips():
     """
-    Chip list API (frontend compatibility)
-    - GET /chips
-    - GET /chips/list
-    - GET /inventory/chips
-
+    칩 목록 조회 API
+    GET /inventory/chips
+    
     Query params:
-      - lot_name: filter by lot name (prefix of chip_uid)
-      - wafer_idx: filter by wafer index
-      - failure_type: filter
-      - limit, offset
+      - lot_name: 로트명으로 필터링 (chip_uid의 접두사)
+      - wafer_idx: 웨이퍼 인덱스로 필터링
+      - failure_type: 불량 유형으로 필터링
+      - limit, offset: 페이지네이션
     """
     limit = _parse_int(request.args.get("limit"), default=200, min_value=1, max_value=1000)
     offset = _parse_int(request.args.get("offset"), default=0, min_value=0)
@@ -129,22 +124,14 @@ def list_chips():
         return jsonify({"error": str(e)}), 500
 
 
-@chip_bp.route("/chip", methods=["GET"])
-@chip_bp.route("/chips/<chip_uid>", methods=["GET"])
-def get_chip(chip_uid=None):
+@inventory_bp.route("/chips/<chip_uid>", methods=["GET"])
+def get_chip(chip_uid):
     """
-    Chip detail API (frontend compatibility)
-    - GET /chip?chip_uid=...
-    - GET /chip?chipId=...
-    - GET /chips/<chip_uid>
+    칩 상세 정보 조회 API
+    GET /inventory/chips/<chip_uid>
+    
+    예: GET /inventory/chips/ABC123X5Y10D1
     """
-    if chip_uid is None:
-        chip_uid = (
-            request.args.get("chip_uid")
-            or request.args.get("chipUid")
-            or request.args.get("chipId")
-            or request.args.get("id")
-        )
     chip_uid = (chip_uid or "").strip()
     if not chip_uid:
         return jsonify({"error": "chip_uid(또는 chipId)가 필요합니다."}), 400

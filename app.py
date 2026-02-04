@@ -34,6 +34,9 @@ app.register_blueprint(wafer_bp)
 from routes.stack import stack_bp
 app.register_blueprint(stack_bp)
 
+from routes.inventory import inventory_bp
+app.register_blueprint(inventory_bp)
+
 from routes.chatbot import chatbot_bp
 app.register_blueprint(chatbot_bp)
 
