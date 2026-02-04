@@ -550,6 +550,11 @@ def get_wafer_list():
         """
         cur.execute(query, (limit, offset))
         rows = cur.fetchall()
+
+        # created_at 날짜 포맷팅 (DB와 일치시키기 위함)
+        for row in rows:
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].strftime('%Y-%m-%d %H:%M:%S')
         
         return jsonify({
             "wafers": rows,
