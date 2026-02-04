@@ -82,8 +82,8 @@ def run_stacking_simulation_logic(batch_id):
         ("Loc", "Loc"): 2.0,
         ("Edge-Loc", "Edge-Loc"): 2.0,
         ("Scratch", "Scratch"): 2.0,
-        ("Random", "Random"): 1.5, # Random은 그나마 좀 허용하되 여전히 높게
-        ("Near-full", "Near-full"): 2.0,
+        ("Random", "Random"): 2.0,
+        ("Near-full", "Near-full"): 3.0,
         ("None", "None"): 0.15,
         
         # 서로 다른 조합은 여전히 낮게 유지 (권장)
@@ -96,9 +96,9 @@ def run_stacking_simulation_logic(batch_id):
         ("Donut", "Loc"): 0.40,
         ("Donut", "Edge-Loc"): 0.40,
         ("Donut", "Scratch"): 0.35,
-        ("Edge-Ring", "Loc"): 0.35,
-        ("Edge-Ring", "Edge-Loc"): 0.35,
-        ("Edge-Ring", "Scratch"): 0.30,
+        ("Edge-Ring", "Loc"): 0.45,
+        ("Edge-Ring", "Edge-Loc"): 0.40,
+        ("Edge-Ring", "Scratch"): 0.40,
         ("Loc", "Edge-Loc"): 0.28,
         ("Loc", "Scratch"): 0.25,
         ("Edge-Loc", "Scratch"): 0.25,
@@ -269,28 +269,68 @@ def run_stacking_simulation_logic(batch_id):
 
     while len(remaining) >= group_size and attempt_count < max_attempts:
         attempt_count += 1
-        # [수정] 1층(Base Die) 선택 시 무작위 추출 (기존 pop(0) -> 항상 Center가 나오는 문제 해결)
+        
+        # [수정] 1층(Base Die) 랜덤 선택
         rand_idx = random.randrange(len(remaining))
-        seed = remaining.pop(rand_idx)
-        group = [seed]
-        failed = False
+        seed_candidate = remaining[rand_idx] # 일단 뽑지 않고 인덱스만 확인
+
+        # [Rule] "Best of N" 전략 (다양성 속에서 최선 찾기)
+        # 동일한 Base Die를 가지고 5번 시뮬레이션을 돌려보고, 개중 가장 Cost가 낮은(좋은) 스택을 확정
+        trial_count = 5
+        best_trial_group = None
+        best_trial_score = float('inf')
+
+        # 시뮬레이션용 임시 Remaining 리스트는 매번 복사하면 느리므로, 
+        # 후보군 비교만 하고 실제 제거는 확정 후에 진행
         
-        for _ in range(group_size - 1):
-            pick = _pick_next(group, remaining)
-            if pick is None:
-                failed = True
-                break
-            remaining.remove(pick)
-            group.append(pick)
-        
-        if failed:
-            remaining.append(seed)
-            for item in group[1:]:
-                if item not in remaining:
-                    remaining.append(item)
+        for _ in range(trial_count):
+            # 가상의 스택 생성 시도
+            temp_remaining = remaining.copy()
+            # seed는 이미 정해짐
+            temp_remaining.pop(rand_idx) 
+            
+            temp_group = [seed_candidate]
+            temp_score_sum = 0
+            failed = False
+
+            for _ in range(group_size - 1):
+                pick = _pick_next(temp_group, temp_remaining)
+                if pick is None:
+                    failed = True
+                    break
+                
+                # 점수 계산 (선택된 칩과 바로 아래 칩 간의 Cost)
+                last_chip = temp_group[-1]
+                cost = cost_mat[last_chip, pick]
+                temp_score_sum += cost
+                
+                temp_remaining.remove(pick)
+                temp_group.append(pick)
+            
+            if not failed:
+                # 평균 점수 (낮을수록 좋음)
+                avg_score = temp_score_sum / (group_size - 1)
+                if avg_score < best_trial_score:
+                    best_trial_score = avg_score
+                    best_trial_group = temp_group
+
+        # 5번 시도 후에도 성공한 스택이 없으면 이 Base Die는 스킵 (다음 기회에)
+        if best_trial_group is None:
+            # 실패했더라도 seed를 맨 뒤로 보내진 않고(random pick이므로), 그냥 continue하면 됨
             continue
+
+        # [확정] 가장 좋았던 스택을 실제 그룹으로 등록하고 remaining에서 제거
+        # seed는 pop 해주어야 함
+        seed = remaining.pop(rand_idx)
         
-        groups.append(group)
+        # 나머지 멤버들도 remaining에서 제거
+        # (주의: seed는 이미 위에서 뺐으므로 나머지 7개만 빼면 됨)
+        final_group_members = best_trial_group[1:] # 0번(seed) 제외
+        for member in final_group_members:
+            if member in remaining:
+                remaining.remove(member)
+        
+        groups.append(best_trial_group)
 
     print(f"[Grouping] 완료: {len(groups)} groups")
 
@@ -363,6 +403,17 @@ def run_stacking_simulation_logic(batch_id):
                     cy
                 ))
                 
+                # Calculate Chip Yield
+                chip_yield = 0.0
+                if isinstance(tsv_val, list) and len(tsv_val) > 0:
+                    try:
+                        arr = np.array(tsv_val)
+                        if arr.size > 0:
+                            count_0 = np.sum(arr == 0)
+                            chip_yield = (float(count_0) / float(arr.size)) * 100.0
+                    except:
+                        pass
+
                 c_lbl = -1 # AI Removed
                 frontend_layer_list.append({
                     "layer_idx": rank + 1,
@@ -370,12 +421,77 @@ def run_stacking_simulation_logic(batch_id):
                     "cluster_label": c_lbl,
                     "mapped_type": mapped_type,
                     "failure_type": raw_failure_type,
-                    "die_status": int(float(row.get('die_status', 2))) if row.get('die_status') else 2
+                    "die_status": int(float(row.get('die_status', 2))) if row.get('die_status') else 2,
+                    "tsv_matrix": tsv_val,
+                    "chip_yield": chip_yield
                 })
             
+            # --- Vertical Stacking Yield & Grade Calculation (Simulation) ---
+            vertical_matrices = []
+            for l in frontend_layer_list:
+                if l['tsv_matrix']:
+                     try:
+                        vertical_matrices.append(np.array(l['tsv_matrix']))
+                     except:
+                        pass
+            
+            final_yield = 0.0
+            final_grade = "N/A"
+            
+            if len(vertical_matrices) > 0:
+                try:
+                    stack_arr = np.array(vertical_matrices)
+                    # 1. 수직 관통 여부 (하나라도 막히면 불량 후보)
+                    merged_defect_map = np.max(stack_arr, axis=0)
+                    
+                    rows, cols = merged_defect_map.shape
+                    total_pins = rows * cols
+                    
+                    # 2. Redundancy (Repair) Logic
+                    # merged_defect_map[i,j] == 1 인 핀에 대해, 
+                    # 주변 8방향(3x3)에 '수직으로 완벽한(0)' 핀이 하나라도 있으면 구제
+                    
+                    # Pad the map to handle edges easily (padding with 1-defect so we don't repair from outside)
+                    padded_map = np.pad(merged_defect_map, pad_width=1, mode='constant', constant_values=1)
+                    
+                    real_defect_count = 0
+                    
+                    for r in range(rows):
+                        for c in range(cols):
+                            if merged_defect_map[r, c] == 1:
+                                # Check 3x3 neighbors in padded_map
+                                # Center in padded is at [r+1, c+1]
+                                # Slice: r:r+3, c:c+3
+                                neighbors = padded_map[r:r+3, c:c+3]
+                                
+                                # 0(Clean)이 하나라도 있으면 Repair 성공
+                                if np.any(neighbors == 0):
+                                    pass # Repaired!
+                                else:
+                                    real_defect_count += 1
+                    
+                    final_yield = ((total_pins - real_defect_count) / total_pins) * 100.0
+                except Exception as e:
+                     print(f"Yield Calc Error: {e}")
+                     avg_yld = sum(l['chip_yield'] for l in frontend_layer_list) / len(frontend_layer_list)
+                     final_yield = avg_yld
+            
+            has_critical_defect = any(l['die_status'] == 2 and l['failure_type'] in ['Random', 'Near-full'] for l in frontend_layer_list)
+            
+            if final_yield >= 96.0 and not has_critical_defect:
+                final_grade = "A"
+            elif final_yield >= 90.0:
+                final_grade = "B"
+            elif final_yield >= 80.0 and not has_critical_defect:
+                final_grade = "B"
+            else:
+                final_grade = "C"
+
             stacks_result.append({
                 "stack_id": stack_id_str,
                 "score": score_label,
+                "final_grade": final_grade,
+                "final_yield": final_yield,
                 "layers": frontend_layer_list
             })
 
@@ -532,9 +648,75 @@ def get_result(tsv_num):
         stacks_result = []
         for g_num in sorted(stacks_map.keys()):
             layers = stacks_map[g_num]
+            
+            # --- [NEW] Vertical Stacking Yield & Grade Calculation ---
+            # 1. Collect all TSV matrices
+            matrices = []
+            for l in layers:
+                if l['tsv_matrix'] and len(l['tsv_matrix']) > 0:
+                    try:
+                        matrices.append(np.array(l['tsv_matrix']))
+                    except:
+                        pass
+            
+            final_yield = 0.0
+            final_grade = "N/A"
+            
+            if len(matrices) > 0:
+                try:
+                    # Assumption: All matrices are same size (e.g. 32x32)
+                    # Stack them along a new axis: (8, 32, 32)
+                    stack_arr = np.array(matrices)
+                    
+                    # 1. Vertical Connectivity Check (Candidates for defect)
+                    merged_defect_map = np.max(stack_arr, axis=0) # 0 or 1
+                    
+                    rows, cols = merged_defect_map.shape
+                    total_pins = rows * cols
+                    
+                    # 2. Redundancy Logic (Repair Check)
+                    padded_map = np.pad(merged_defect_map, pad_width=1, mode='constant', constant_values=1)
+                    real_defect_count = 0
+                    
+                    for r in range(rows):
+                        for c in range(cols):
+                            if merged_defect_map[r, c] == 1:
+                                # Check 3x3 neighbors
+                                neighbors = padded_map[r:r+3, c:c+3]
+                                if np.any(neighbors == 0):
+                                    pass # Repaired
+                                else:
+                                    real_defect_count += 1
+                                    
+                    final_yield = ((total_pins - real_defect_count) / total_pins) * 100.0
+                    
+                except Exception as e:
+                    print(f"Stack Calc Error: {e}")
+                    # Fallback: average of individual yields
+                    individual_yields = [l['chip_yield'] for l in layers]
+                    final_yield = sum(individual_yields) / len(individual_yields) if individual_yields else 0.0
+
+            # 3. Grading Logic
+            # A: Yield >= 96% AND All layers are Normal(1)
+            # B: Yield >= 90%
+            # C: Yield < 90% OR Critical Defect Exists
+            
+            has_critical_defect = any(l['die_status'] == 2 and l['failure_type'] in ['Random', 'Near-full'] for l in layers)
+            
+            if final_yield >= 96.0 and not has_critical_defect:
+                final_grade = "A"
+            elif final_yield >= 90.0:
+                final_grade = "B"
+            elif final_yield >= 85.0 and not has_critical_defect:
+                final_grade = "B"
+            else:
+                final_grade = "C"
+
             stacks_result.append({
                 "stack_id": f"STACK_DB_{tsv_num}_{g_num}",
                 "score": "Loaded",
+                "final_grade": final_grade,
+                "final_yield": final_yield,
                 "layers": layers
             })
             

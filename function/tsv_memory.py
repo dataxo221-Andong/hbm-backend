@@ -19,6 +19,18 @@ def gen_none(shape, noise_range=(0, 3)):
     return matrix
 
 
+def _add_background_noise(matrix, density_range=(0.005, 0.03)):
+    """
+    패턴 주변에 랜덤 노이즈(점 불량) 추가
+    """
+    h, w = matrix.shape
+    density = random.uniform(*density_range)
+    noise = np.random.choice([0, 1], size=(h, w), p=[1 - density, density])
+    # 기존 매트릭스와 합치기 (OR 연산)
+    matrix = np.maximum(matrix, noise.astype(np.uint8))
+    return matrix
+
+
 def gen_center(shape):
     matrix = np.zeros(shape, dtype=np.uint8)
     h, w = shape
@@ -29,7 +41,7 @@ def gen_center(shape):
     mask = (x_idx - cx) ** 2 + (y_idx - cy) ** 2 <= radius**2
     prob_mask = np.random.rand(h, w) < random.uniform(0.95, 1.0)
     matrix[mask & prob_mask] = 1
-    return matrix
+    return _add_background_noise(matrix)
 
 
 def gen_donut(shape):
@@ -43,7 +55,7 @@ def gen_donut(shape):
     mask = (dist_sq >= r_in**2) & (dist_sq <= r_out**2)
     prob_mask = np.random.rand(h, w) < random.uniform(0.9, 1.0)
     matrix[mask & prob_mask] = 1
-    return matrix
+    return _add_background_noise(matrix)
 
 
 def gen_edge_ring(shape):
@@ -56,7 +68,7 @@ def gen_edge_ring(shape):
     matrix[:, -thickness:] = 1
     gap_prob = np.random.rand(h, w)
     matrix[gap_prob < 0.03] = 0
-    return matrix
+    return _add_background_noise(matrix)
 
 
 def gen_edge_loc(shape):
@@ -75,7 +87,7 @@ def gen_edge_loc(shape):
     y_idx, x_idx = np.ogrid[:h, :w]
     mask = (x_idx - cx) ** 2 + (y_idx - cy) ** 2 <= cluster_r**2
     matrix[mask] = 1
-    return matrix
+    return _add_background_noise(matrix)
 
 
 def gen_loc(shape):
@@ -86,7 +98,7 @@ def gen_loc(shape):
     y_idx, x_idx = np.ogrid[:h, :w]
     mask = (x_idx - cx) ** 2 + (y_idx - cy) ** 2 <= radius**2
     matrix[mask] = 1
-    return matrix
+    return _add_background_noise(matrix)
 
 
 def gen_scratch(shape):
