@@ -458,7 +458,7 @@ def get_result(tsv_num):
     cur = conn.cursor()
     try:
         sql = """
-            SELECT group_number, position_in_group, chip_uid, failure_type, die_status
+            SELECT group_number, position_in_group, chip_uid, failure_type, die_status, tsv_status
             FROM grouped_data
             WHERE tsv_num = %s
             ORDER BY group_number, position_in_group
@@ -474,21 +474,48 @@ def get_result(tsv_num):
                 uid = r['chip_uid']
                 ftype = r['failure_type']
                 dstatus = r['die_status']
+                tstatus_str = r['tsv_status']
             else:
                 g_num = r[0]
                 pos = r[1]
                 uid = r[2]
                 ftype = r[3]
                 dstatus = r[4]
+                tstatus_str = r[5]
             
             if g_num not in stacks_map:
                 stacks_map[g_num] = []
             
             # die_status 처리
             try:
-                ds = int(float(dstatus)) if dstatus else 1 # Default 1 if missing in DB
+                ds = int(float(dstatus)) if dstatus else 1 
             except:
                 ds = 1
+
+            # tsv_status 파싱 (DB에는 JSON String으로 저장됨)
+            tsv_matrix = []
+            if tstatus_str:
+                try:
+                    loaded = json.loads(tstatus_str)
+                    if isinstance(loaded, list):
+                        tsv_matrix = loaded
+                except:
+                    tsv_matrix = []
+
+            # Yield 계산 (0: 정상, 1: 불량)
+            # 0 개수 / 전체 개수
+            chip_yield = 0.0
+            if tsv_matrix:
+                try:
+                    # 2D list flatten or just count
+                    arr = np.array(tsv_matrix)
+                    total_p = arr.size
+                    if total_p > 0:
+                        count_0 = np.sum(arr == 0)
+                        chip_yield = (float(count_0) / float(total_p)) * 100.0
+                except Exception as e:
+                    print(f"Yield Calc Error: {e}")
+                    chip_yield = 0.0
 
             layer = {
                 "layer_idx": pos,
@@ -496,7 +523,9 @@ def get_result(tsv_num):
                 "cluster_label": -1,
                 "mapped_type": ftype,
                 "failure_type": ftype,
-                "die_status": ds
+                "die_status": ds,
+                "tsv_matrix": tsv_matrix,
+                "chip_yield": chip_yield
             }
             stacks_map[g_num].append(layer)
 
