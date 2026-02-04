@@ -215,8 +215,10 @@ class WaferProcessor:
                 f"{quote(blob.name, safe='')}?alt=media&token={download_token}"
             )
         except Exception as e:
-            print(f"[Warning] Firebase Upload Failed: {e}")
-            wafer_map_url = None
+            print(f"[Error] Firebase Upload Failed: {e}")
+            # wafer_map_url = None
+            # [수정] 이미지가 없으면 DB에 저장하지 않고 에러 처리
+            return jsonify({"error": f"Firebase Upload Failed: {str(e)}"}), 500
 
         # 데이터 구조 준비
         wafer_data = {
@@ -540,7 +542,7 @@ def get_wafer_list():
         
         # 2. 데이터 조회
         query = """
-            SELECT lot_name, failure_type, die_count, defect_count, defect_density, total_grade, created_at 
+            SELECT lot_name, failure_type, die_count, defect_count, defect_density, total_grade, created_at, wafer_map
             FROM wafer_data 
             ORDER BY created_at DESC 
             LIMIT %s OFFSET %s
