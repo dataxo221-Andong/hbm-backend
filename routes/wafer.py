@@ -485,12 +485,13 @@ def analyze_wafer(lot_name):
                 "batchId": batch_id,
                 "result": {
                     "failure_type": wafer_data['failure_type'],
+                    "confidence": wafer_data['confidence'],
                     "total_grade": wafer_data['total_grade'],
                     "defect_density": wafer_data['defect_density'],
                     "die_count": wafer_data['die_count'],
-                    "defect_count": wafer_data['defect_count'],
-                    "img_url": wafer_data['img_url']
-                }
+                    "defect_count": wafer_data['defect_count']
+                },
+                "img_url": wafer_data['img_url']
             }), 200
 
         except Exception as e:
@@ -542,7 +543,7 @@ def get_wafer_list():
         
         # 2. 데이터 조회
         query = """
-            SELECT lot_name, failure_type, die_count, defect_count, defect_density, total_grade, created_at, wafer_map
+            SELECT lot_name, failure_type, confidence, die_count, defect_count, defect_density, total_grade, created_at, wafer_map
             FROM wafer_data 
             ORDER BY created_at DESC 
             LIMIT %s OFFSET %s
@@ -611,6 +612,77 @@ def get_total_status():
 
     except Exception as e:
         print(f"[Error] /total_status: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+# ==========================================
+# CSV 내보내기 API
+# ==========================================
+@wafer_bp.route("/export", methods=["GET"])
+def export_wafer_data():
+    """wafer_data 테이블을 CSV 파일로 내보내기"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        
+        # wafer_data 테이블 전체 조회
+        query = """
+            SELECT lot_name, failure_type, confidence, die_count, defect_count, 
+                   defect_density, total_grade, created_at
+            FROM wafer_data 
+            ORDER BY created_at DESC
+        """
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+        if not rows:
+            return jsonify({"error": "No data to export"}), 404
+        
+        # CSV 생성
+        import io
+        import csv
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # 헤더 작성
+        headers = ["Lot Name", "Failure Type", "Confidence", "Die Count", 
+                   "Defect Count", "Defect Density", "Grade", "Created At"]
+        writer.writerow(headers)
+        
+        # 데이터 작성
+        for row in rows:
+            writer.writerow([
+                row['lot_name'],
+                row['failure_type'],
+                f"{row['confidence']:.4f}" if row['confidence'] else "",
+                row['die_count'],
+                row['defect_count'],
+                f"{row['defect_density']:.6f}" if row['defect_density'] else "",
+                row['total_grade'],
+                row['created_at'].strftime('%Y-%m-%d %H:%M:%S') if row['created_at'] else ""
+            ])
+        
+        # CSV 데이터 가져오기
+        csv_data = output.getvalue()
+        output.close()
+        
+        # 파일명 생성 (현재 날짜시간 포함)
+        now = datetime.datetime.now()
+        filename = f"wafer_data_{now.strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        # Response 생성
+        from flask import make_response
+        response = make_response(csv_data)
+        response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+        response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"  # UTF-8 BOM for Excel
+        
+        return response
+
+    except Exception as e:
+        print(f"[Error] /export: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
