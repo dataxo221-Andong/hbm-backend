@@ -37,6 +37,9 @@ app.register_blueprint(stack_bp)
 from routes.chatbot import chatbot_bp
 app.register_blueprint(chatbot_bp)
 
+from routes.crawler_routes import crawler_bp
+app.register_blueprint(crawler_bp)
+
 @app.route('/')
 def health_check():
     return {"status": "ok", "message": "Backend server is running"}

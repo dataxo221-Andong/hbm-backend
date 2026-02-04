@@ -1,2 +1,5 @@
 models/
 wafer-firebase-key.json
+.env
+.env.local
+.env.*.local
