@@ -62,24 +62,24 @@ def initialize_gemini(retry_count=0):
         
         logger.info("🧪 Gemini 연결 테스트...")
         
-        # 사용 가능한 모델 목록 출력
-        try:
-            logger.info("📋 사용 가능한 모델 목록 조회 중...")
-            available_models = client.models.list()
-            logger.info("=" * 60)
-            logger.info("✅ 사용 가능한 Gemini 모델 목록:")
-            for model in available_models:
-                model_name = getattr(model, 'name', str(model))
-                logger.info(f"   - {model_name}")
-            logger.info("=" * 60)
-        except Exception as list_error:
-            logger.warning(f"⚠️ 모델 목록 조회 실패: {list_error}")
+        # 사용 가능한 모델 목록 출력 (비활성화)
+        # try:
+        #     logger.info("📋 사용 가능한 모델 목록 조회 중...")
+        #     available_models = client.models.list()
+        #     logger.info("=" * 60)
+        #     logger.info("✅ 사용 가능한 Gemini 모델 목록:")
+        #     for model in available_models:
+        #         model_name = getattr(model, 'name', str(model))
+        #         logger.info(f"   - {model_name}")
+        #     logger.info("=" * 60)
+        # except Exception as list_error:
+        #     logger.warning(f"⚠️ 모델 목록 조회 실패: {list_error}")
         
         # 연결 테스트
         test_prompt = "안녕하세요. 'OK'라고 간단히 답변해주세요."
         try:
             test_response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-pro",
                 contents=test_prompt
             )
         except Exception as test_error:
@@ -177,7 +177,7 @@ def get_gemini_response(prompt: str, use_chat_session: bool = False, max_retries
                 contents = chat_history + [{"role": "user", "content": prompt}]
                 try:
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-2.5-pro",
                         contents=contents,
                         config={
                             "temperature": temperature,
@@ -191,14 +191,14 @@ def get_gemini_response(prompt: str, use_chat_session: bool = False, max_retries
                     # API 형식이 다를 수 있으므로 다른 방식 시도
                     logger.warning(f"첫 번째 API 형식 실패, 대체 방식 시도: {api_error}")
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-2.5-pro",
                         contents=contents
                     )
             else:
                 # 일반 생성 (매번 새로운 컨텍스트)
                 try:
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-2.5-pro",
                         contents=prompt,
                         config={
                             "temperature": temperature,
@@ -212,7 +212,7 @@ def get_gemini_response(prompt: str, use_chat_session: bool = False, max_retries
                     # API 형식이 다를 수 있으므로 다른 방식 시도
                     logger.warning(f"첫 번째 API 형식 실패, 대체 방식 시도: {api_error}")
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-2.5-pro",
                         contents=prompt
                     )
             
@@ -313,7 +313,7 @@ def get_api_status():
         "chat_history_active": len(chat_history) > 0 if chat_history else False,
         "chat_history_length": len(chat_history) if chat_history else 0,
         "initialization_attempts": INITIALIZATION_ATTEMPTS,
-        "model_name": "gemini-2.5-flash",
+        "model_name": "gemini-2.5-pro",
         "statistics": {
             "total_requests": REQUEST_COUNT,
             "successful_requests": SUCCESSFUL_REQUESTS,

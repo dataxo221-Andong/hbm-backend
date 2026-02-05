@@ -6,16 +6,27 @@ import requests
 from typing import Optional, Dict, Any, List
 import os
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+import time
 
 load_dotenv()
 
 class HBMDataCrawler:
     """HBM Dashboard 각 페이지의 데이터를 크롤링하는 클래스"""
     
-    def __init__(self, base_url: Optional[str] = None):
+    def __init__(self, base_url: Optional[str] = None, frontend_url: Optional[str] = None):
         """
         초기화
-        base_url이 None이면 환경변수에서 가져오거나 기본값 사용
+        base_url: 백엔드 API URL
+        frontend_url: 프론트엔드 웹 페이지 URL
         """
         if base_url is None:
             # 환경변수에서 백엔드 URL 가져오기
@@ -23,7 +34,13 @@ class HBMDataCrawler:
         else:
             self.base_url = base_url
         
-        print(f"🌐 HBMDataCrawler 초기화 - 서버: {self.base_url}")
+        if frontend_url is None:
+            # 환경변수에서 프론트엔드 URL 가져오기
+            self.frontend_url = os.getenv("HBM_FRONTEND_URL", "http://localhost:3000")
+        else:
+            self.frontend_url = frontend_url
+        
+        print(f"🌐 HBMDataCrawler 초기화 - 백엔드: {self.base_url}, 프론트엔드: {self.frontend_url}")
     
     def test_endpoint_sync(self, endpoint: str) -> Dict[str, Any]:
         """동기적으로 엔드포인트 테스트"""
@@ -291,58 +308,702 @@ class HBMDataCrawler:
                 "data": None
             }
     
-    async def crawl_wafermodeling_data(self) -> Dict[str, Any]:
-        """웨이퍼 모델링 데이터 크롤링 (wafermodeling 페이지)"""
+    def _get_selenium_driver(self):
+        """Selenium WebDriver 생성 (재사용 가능)"""
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')  # 백그라운드 실행
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
         try:
-            print("🔬 Wafer Modeling 데이터 크롤링 시작...")
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            return driver
+        except Exception as e:
+            print(f"⚠️ ChromeDriver 초기화 실패: {e}")
+            print("💡 Chrome 브라우저가 설치되어 있는지 확인하세요.")
+            return None
+    
+    def _crawl_wafer_page_html(self, page_url: str) -> Optional[Dict[str, Any]]:
+        """웨이퍼 페이지 HTML 크롤링하여 데이터 추출"""
+        driver = None
+        try:
+            print(f"🌐 웨이퍼 페이지 HTML 크롤링 시작: {page_url}")
             
-            # HTTP 요청으로 웨이퍼 관련 API 엔드포인트 호출
-            # 참고: crawler_routes.py에서 직접 함수 호출로 대체됨
-            wafer_data = await self.fetch_api_data("/wafer")
+            driver = self._get_selenium_driver()
+            if driver is None:
+                print("⚠️ Selenium 드라이버를 생성할 수 없습니다.")
+                return None
             
-            if wafer_data is None:
-                # 데모 데이터 구조 반환
-                print("⚠️ API 데이터 없음, 데모 데이터 구조 반환")
-                wafer_data = {
-                    "wafers": [],
-                    "statistics": {
-                        "total_wafers": 0,
-                        "total_good_die": 0,
-                        "total_bad_die": 0,
-                        "defect_rate": 0
+            # Performance Log 활성화 (네트워크 요청 가로채기)
+            driver.execute_cdp_cmd('Performance.enable', {})
+            driver.execute_cdp_cmd('Network.enable', {})
+            
+            driver.get(page_url)
+            wait = WebDriverWait(driver, 30)
+            print("⏳ 페이지 로딩 및 JavaScript 실행 대기 중...")
+            time.sleep(10)  # 페이지 로딩 및 API 호출 완료 대기
+            
+            try:
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            except TimeoutException:
+                print("⚠️ 페이지 로딩 타임아웃, 계속 진행...")
+            
+            # 방법 1: 네트워크 요청 가로채기 (가장 정확)
+            wafers_data = None
+            try:
+                logs = driver.get_log('performance')
+                for log in logs:
+                    message = json.loads(log['message'])
+                    method = message.get('message', {}).get('method', '')
+                    
+                    if method == 'Network.responseReceived':
+                        response = message.get('message', {}).get('params', {}).get('response', {})
+                        url = response.get('url', '')
+                        
+                        if '/wafer/list' in url:
+                            request_id = message.get('message', {}).get('params', {}).get('requestId', '')
+                            try:
+                                response_body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                                if response_body and 'body' in response_body:
+                                    wafers_data = json.loads(response_body['body'])
+                                    print(f"✅ 웨이퍼 API 응답에서 데이터 추출 성공: {len(wafers_data.get('wafers', []))}개")
+                                    break
+                            except Exception as e:
+                                print(f"⚠️ 응답 본문 가져오기 실패: {e}")
+            except Exception as e:
+                print(f"⚠️ 네트워크 요청 가로채기 실패: {e}")
+            
+            # 방법 2: 통계 정보도 가로채기
+            stats_data = None
+            try:
+                logs = driver.get_log('performance')
+                for log in logs:
+                    message = json.loads(log['message'])
+                    method = message.get('message', {}).get('method', '')
+                    
+                    if method == 'Network.responseReceived':
+                        response = message.get('message', {}).get('params', {}).get('response', {})
+                        url = response.get('url', '')
+                        
+                        if '/wafer/total_status' in url:
+                            request_id = message.get('message', {}).get('params', {}).get('requestId', '')
+                            try:
+                                response_body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                                if response_body and 'body' in response_body:
+                                    stats_data = json.loads(response_body['body'])
+                                    print(f"✅ 통계 API 응답에서 데이터 추출 성공")
+                                    break
+                            except:
+                                pass
+            except:
+                pass
+            
+            driver.quit()
+            
+            # 데이터 정규화
+            if wafers_data:
+                wafers = wafers_data.get("wafers", []) if isinstance(wafers_data, dict) else []
+                
+                # 데이터 변환
+                formatted_wafers = []
+                for w in wafers:
+                    lot_name = w.get('lot_name', '')
+                    die_count = w.get('die_count', 0)
+                    defect_count = w.get('defect_count', 0)
+                    good_die = die_count - defect_count
+                    
+                    yield_value = None
+                    if die_count > 0:
+                        yield_value = round((good_die / die_count) * 100, 1)
+                    
+                    formatted_wafers.append({
+                        "id": lot_name,
+                        "lot_name": lot_name,
+                        "batch": "BATCH",
+                        "status": "completed" if w.get('total_grade') else "pending",
+                        "yield": yield_value,
+                        "grade": w.get('total_grade'),
+                        "processedAt": w.get('created_at'),
+                        "confidence": float(w.get('confidence', 0)) if w.get('confidence') else None,
+                        "failure_type": w.get('failure_type'),
+                        "waferMapData": {
+                            "good": good_die,
+                            "bad": defect_count,
+                            "total": die_count
+                        },
+                        "imageUrl": w.get('wafer_map')
+                    })
+                
+                # 통계 계산
+                completed_wafers = [w for w in formatted_wafers if w.get('status') == 'completed']
+                total_good_die = sum(w.get('waferMapData', {}).get('good', 0) for w in completed_wafers)
+                total_bad_die = sum(w.get('waferMapData', {}).get('bad', 0) for w in completed_wafers)
+                total_die = total_good_die + total_bad_die
+                defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
+                
+                # API 통계 정보 사용
+                if stats_data and isinstance(stats_data, dict):
+                    total_wafers = stats_data.get('totalWafers', len(completed_wafers))
+                    if stats_data.get('totalDie', 0) > 0:
+                        total_good_die = stats_data.get('totalDie', 0) - stats_data.get('defectCount', 0)
+                        total_bad_die = stats_data.get('defectCount', 0)
+                        total_die = stats_data.get('totalDie', 0)
+                        defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
+                else:
+                    total_wafers = len(completed_wafers)
+                
+                return {
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "wafermodeling",
+                    "data": {
+                        "wafers": formatted_wafers,
+                        "statistics": {
+                            "total_wafers": total_wafers,
+                            "total_good_die": int(total_good_die),
+                            "total_bad_die": int(total_bad_die),
+                            "defect_rate": defect_rate
+                        },
+                        "summary": {
+                            "total_wafers": len(formatted_wafers),
+                            "completed_count": len(completed_wafers),
+                            "processing_count": 0,
+                            "pending_count": len(formatted_wafers) - len(completed_wafers)
+                        }
                     },
                     "summary": {
-                        "total_wafers": 0,
-                        "completed_count": 0,
-                        "processing_count": 0,
-                        "pending_count": 0
+                        "total_wafers": len(formatted_wafers),
+                        "crawled_at": datetime.now().isoformat()
                     }
                 }
             
-            # 디버깅: 받은 데이터 확인
-            print(f"🔍 [DEBUG] 크롤러가 받은 웨이퍼 데이터:")
-            print(f"  - 타입: {type(wafer_data)}")
-            if isinstance(wafer_data, dict):
-                print(f"  - 키: {list(wafer_data.keys())}")
-                if "wafers" in wafer_data:
-                    print(f"  - 웨이퍼 수: {len(wafer_data.get('wafers', []))}")
-                    if len(wafer_data.get('wafers', [])) > 0:
-                        first_wafer = wafer_data.get('wafers', [])[0]
-                        print(f"  - 첫 번째 웨이퍼 ID: {first_wafer.get('id', 'N/A')}")
-                        print(f"  - 첫 번째 웨이퍼 lot_name: {first_wafer.get('lot_name', 'N/A')}")
+            return None
             
-            # 데이터 정규화
+        except TimeoutException:
+            print(f"⏰ 페이지 로딩 타임아웃: {page_url}")
+            if driver:
+                driver.quit()
+            return None
+        except Exception as e:
+            print(f"❌ HTML 크롤링 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            if driver:
+                driver.quit()
+            return None
+    
+    def _crawl_inventory_page_html(self, page_url: str) -> Optional[Dict[str, Any]]:
+        """재고 페이지 HTML 크롤링"""
+        driver = None
+        try:
+            print(f"🌐 재고 페이지 HTML 크롤링 시작: {page_url}")
+            
+            driver = self._get_selenium_driver()
+            if driver is None:
+                return None
+            
+            driver.execute_cdp_cmd('Performance.enable', {})
+            driver.execute_cdp_cmd('Network.enable', {})
+            
+            driver.get(page_url)
+            time.sleep(10)
+            
+            # 네트워크 요청 가로채기
+            inventory_items = []
+            try:
+                logs = driver.get_log('performance')
+                for log in logs:
+                    message = json.loads(log['message'])
+                    method = message.get('message', {}).get('method', '')
+                    
+                    if method == 'Network.responseReceived':
+                        response = message.get('message', {}).get('params', {}).get('response', {})
+                        url = response.get('url', '')
+                        
+                        if '/chip-inspection' in url or '/inventory' in url:
+                            request_id = message.get('message', {}).get('params', {}).get('requestId', '')
+                            try:
+                                response_body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                                if response_body and 'body' in response_body:
+                                    data = json.loads(response_body['body'])
+                                    if isinstance(data, list):
+                                        inventory_items = data
+                                    elif isinstance(data, dict) and 'items' in data:
+                                        inventory_items = data['items']
+                                    print(f"✅ 재고 API 응답에서 데이터 추출 성공")
+                                    break
+                            except:
+                                pass
+            except Exception as e:
+                print(f"⚠️ 네트워크 요청 가로채기 실패: {e}")
+            
+            driver.quit()
+            
+            # 프론트엔드에 하드코딩된 재고 데이터 사용 (네트워크 요청 실패 시)
+            if not inventory_items:
+                print("⚠️ 네트워크 요청에서 데이터 추출 실패, 하드코딩된 재고 데이터 사용")
+                inventory_items = [
+                    {
+                        "id": "1",
+                        "name": "DRAM Die (HBM3)",
+                        "category": "dram_die",
+                        "sku": "DRAM-HBM3-8GB",
+                        "currentStock": 15420,
+                        "minStock": 10000,
+                        "maxStock": 25000,
+                        "optimalStock": 18000,
+                        "status": "optimal"
+                    },
+                    {
+                        "id": "2",
+                        "name": "Logic Die (Base)",
+                        "category": "logic_die",
+                        "sku": "LOGIC-BASE-V2",
+                        "currentStock": 8540,
+                        "minStock": 8000,
+                        "maxStock": 20000,
+                        "optimalStock": 12000,
+                        "status": "low"
+                    },
+                    {
+                        "id": "3",
+                        "name": "HBM3 8단 스택",
+                        "category": "hbm_stack",
+                        "sku": "HBM3-8HI-24GB",
+                        "currentStock": 2340,
+                        "minStock": 2000,
+                        "maxStock": 5000,
+                        "optimalStock": 3500,
+                        "status": "low"
+                    },
+                    {
+                        "id": "5",
+                        "name": "완제품 HBM3",
+                        "category": "finished",
+                        "sku": "HBM3-PKG-FINAL",
+                        "currentStock": 890,
+                        "minStock": 500,
+                        "maxStock": 2000,
+                        "optimalStock": 1200,
+                        "status": "optimal"
+                    },
+                    {
+                        "id": "6",
+                        "name": "Base Die Substrate",
+                        "category": "raw_die",
+                        "sku": "SUB-BASE-300MM",
+                        "currentStock": 22500,
+                        "minStock": 15000,
+                        "maxStock": 25000,
+                        "optimalStock": 20000,
+                        "status": "excess"
+                    }
+                ]
+            
+            return {
+                "items": inventory_items,
+                "summary": {
+                    "total_items": len(inventory_items),
+                    "crawled_from": "frontend_html"
+                }
+            }
+            
+        except Exception as e:
+            print(f"❌ 재고 페이지 크롤링 오류: {e}")
+            if driver:
+                driver.quit()
+            return None
+    
+    def _crawl_logs_page_html(self, page_url: str) -> Optional[Dict[str, Any]]:
+        """로그 페이지 HTML 크롤링"""
+        driver = None
+        try:
+            print(f"🌐 로그 페이지 HTML 크롤링 시작: {page_url}")
+            
+            driver = self._get_selenium_driver()
+            if driver is None:
+                return None
+            
+            driver.execute_cdp_cmd('Performance.enable', {})
+            driver.execute_cdp_cmd('Network.enable', {})
+            
+            driver.get(page_url)
+            time.sleep(10)
+            
+            # 네트워크 요청 가로채기
+            logs_data = []
+            try:
+                logs = driver.get_log('performance')
+                for log in logs:
+                    message = json.loads(log['message'])
+                    method = message.get('message', {}).get('method', '')
+                    
+                    if method == 'Network.responseReceived':
+                        response = message.get('message', {}).get('params', {}).get('response', {})
+                        url = response.get('url', '')
+                        
+                        if '/logs' in url or '/yield' in url:
+                            request_id = message.get('message', {}).get('params', {}).get('requestId', '')
+                            try:
+                                response_body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                                if response_body and 'body' in response_body:
+                                    data = json.loads(response_body['body'])
+                                    if isinstance(data, list):
+                                        logs_data = data
+                                    elif isinstance(data, dict) and 'logs' in data:
+                                        logs_data = data['logs']
+                                    print(f"✅ 로그 API 응답에서 데이터 추출 성공")
+                                    break
+                            except:
+                                pass
+            except Exception as e:
+                print(f"⚠️ 네트워크 요청 가로채기 실패: {e}")
+            
+            driver.quit()
+            
+            return {
+                "logs": logs_data,
+                "summary": {
+                    "total_logs": len(logs_data),
+                    "crawled_from": "frontend_html"
+                }
+            }
+            
+        except Exception as e:
+            print(f"❌ 로그 페이지 크롤링 오류: {e}")
+            if driver:
+                driver.quit()
+            return None
+    
+    def _crawl_stacking_page_html(self, page_url: str) -> Optional[Dict[str, Any]]:
+        """적층 페이지 HTML 크롤링"""
+        driver = None
+        try:
+            print(f"🌐 적층 페이지 HTML 크롤링 시작: {page_url}")
+            
+            driver = self._get_selenium_driver()
+            if driver is None:
+                return None
+            
+            driver.execute_cdp_cmd('Performance.enable', {})
+            driver.execute_cdp_cmd('Network.enable', {})
+            
+            driver.get(page_url)
+            time.sleep(10)
+            
+            # 네트워크 요청 가로채기
+            stacks_data = []
+            try:
+                logs = driver.get_log('performance')
+                for log in logs:
+                    message = json.loads(log['message'])
+                    method = message.get('message', {}).get('method', '')
+                    
+                    if method == 'Network.responseReceived':
+                        response = message.get('message', {}).get('params', {}).get('response', {})
+                        url = response.get('url', '')
+                        
+                        if '/stack' in url or '/stacking' in url:
+                            request_id = message.get('message', {}).get('params', {}).get('requestId', '')
+                            try:
+                                response_body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                                if response_body and 'body' in response_body:
+                                    data = json.loads(response_body['body'])
+                                    if isinstance(data, list):
+                                        stacks_data = data
+                                    elif isinstance(data, dict) and 'stacks' in data:
+                                        stacks_data = data['stacks']
+                                    print(f"✅ 적층 API 응답에서 데이터 추출 성공")
+                                    break
+                            except:
+                                pass
+            except Exception as e:
+                print(f"⚠️ 네트워크 요청 가로채기 실패: {e}")
+            
+            driver.quit()
+            
+            return {
+                "stacks": stacks_data,
+                "summary": {
+                    "total_stacks": len(stacks_data),
+                    "crawled_from": "frontend_html"
+                }
+            }
+            
+        except Exception as e:
+            print(f"❌ 적층 페이지 크롤링 오류: {e}")
+            if driver:
+                driver.quit()
+            return None
+    
+    async def crawl_wafermodeling_data(self) -> Dict[str, Any]:
+        """웨이퍼 모델링 데이터 크롤링 (웹 API 호출 방식)"""
+        try:
+            print("🔬 Wafer Modeling 데이터 크롤링 시작 (웹 API 호출)...")
+            
+            # 1. 웨이퍼 목록 조회 (모든 페이지 수집)
+            all_wafers = []
+            page = 1
+            limit = 100  # 한 번에 많이 가져오기
+            total_wafers_count = 0
+            
+            while True:
+                wafer_list_response = await self.fetch_api_data(f"/wafer/list?page={page}&limit={limit}")
+                
+                if wafer_list_response is None or not isinstance(wafer_list_response, dict):
+                    print(f"⚠️ 페이지 {page} 데이터 없음")
+                    break
+                
+                wafers = wafer_list_response.get("wafers", [])
+                total_wafers_count = wafer_list_response.get("total", 0)
+                
+                if not wafers:
+                    break
+                
+                all_wafers.extend(wafers)
+                print(f"📄 페이지 {page}: {len(wafers)}개 웨이퍼 수집 (전체: {len(all_wafers)}/{total_wafers_count})")
+                
+                # 다음 페이지가 없으면 중단
+                if len(all_wafers) >= total_wafers_count or len(wafers) < limit:
+                    break
+                
+                page += 1
+            
+            # 2. 통계 정보 조회
+            stats_response = await self.fetch_api_data("/wafer/total_status")
+            
+            # 3. 데이터 변환 (프론트엔드 형식에 맞게)
+            formatted_wafers = []
+            for w in all_wafers:
+                lot_name = w.get('lot_name', '')
+                die_count = w.get('die_count', 0)
+                defect_count = w.get('defect_count', 0)
+                good_die = die_count - defect_count
+                
+                # 수율 계산
+                yield_value = None
+                if die_count > 0:
+                    yield_value = round((good_die / die_count) * 100, 1)
+                
+                formatted_wafers.append({
+                    "id": lot_name,
+                    "lot_name": lot_name,
+                    "batch": "BATCH",
+                    "status": "completed" if w.get('total_grade') else "pending",
+                    "yield": yield_value,
+                    "grade": w.get('total_grade'),
+                    "processedAt": w.get('created_at'),
+                    "confidence": float(w.get('confidence', 0)) if w.get('confidence') else None,
+                    "failure_type": w.get('failure_type'),
+                    "waferMapData": {
+                        "good": good_die,
+                        "bad": defect_count,
+                        "total": die_count
+                    },
+                    "imageUrl": w.get('wafer_map')  # Firebase URL
+                })
+            
+            # 4. 통계 계산
+            completed_wafers = [w for w in formatted_wafers if w.get('status') == 'completed']
+            total_good_die = sum(w.get('waferMapData', {}).get('good', 0) for w in completed_wafers)
+            total_bad_die = sum(w.get('waferMapData', {}).get('bad', 0) for w in completed_wafers)
+            total_die = total_good_die + total_bad_die
+            defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
+            
+            # 5. 통계 정보 (API에서 가져온 값 우선 사용)
+            if stats_response and isinstance(stats_response, dict):
+                total_wafers = stats_response.get('totalWafers', len(completed_wafers))
+                # API 통계와 계산된 통계 중 더 정확한 값 사용
+                if stats_response.get('totalDie', 0) > 0:
+                    total_good_die = stats_response.get('totalDie', 0) - stats_response.get('defectCount', 0)
+                    total_bad_die = stats_response.get('defectCount', 0)
+                    total_die = stats_response.get('totalDie', 0)
+                    defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
+            else:
+                total_wafers = len(completed_wafers)
+            
+            # 6. 최종 데이터 구조 생성
+            wafer_data = {
+                "wafers": formatted_wafers,
+                "statistics": {
+                    "total_wafers": total_wafers,
+                    "total_good_die": int(total_good_die),
+                    "total_bad_die": int(total_bad_die),
+                    "defect_rate": defect_rate
+                },
+                "summary": {
+                    "total_wafers": len(formatted_wafers),
+                    "completed_count": len(completed_wafers),
+                    "processing_count": 0,
+                    "pending_count": len(formatted_wafers) - len(completed_wafers)
+                }
+            }
+            
+            # 디버깅: 받은 데이터 확인
+            print(f"🔍 [DEBUG] 크롤러가 수집한 웨이퍼 데이터:")
+            print(f"  - 총 웨이퍼 수: {len(formatted_wafers)}개")
+            print(f"  - 완료된 웨이퍼: {len(completed_wafers)}개")
+            print(f"  - 총 Good Die: {total_good_die}개")
+            print(f"  - 총 Bad Die: {total_bad_die}개")
+            print(f"  - 불량률: {defect_rate}%")
+            if len(formatted_wafers) > 0:
+                print(f"  - 첫 번째 웨이퍼 ID: {formatted_wafers[0].get('id', 'N/A')}")
+            
+            # 7. 크롤러 형식에 맞게 변환
             result = {
                 "timestamp": datetime.now().isoformat(),
                 "source": "wafermodeling",
                 "data": wafer_data,
                 "summary": {
-                    "total_wafers": len(wafer_data.get("wafers", [])) if isinstance(wafer_data, dict) else len(wafer_data) if isinstance(wafer_data, list) else 0,
+                    "total_wafers": len(formatted_wafers),
                     "crawled_at": datetime.now().isoformat()
                 }
             }
             
-            print(f"✅ Wafer Modeling 데이터 크롤링 완료: {result['summary']['total_wafers']}개 항목")
+            print(f"✅ Wafer Modeling 데이터 크롤링 완료: {len(formatted_wafers)}개 웨이퍼 (웹 API 호출)")
+            return result
+            
+        except Exception as e:
+            print(f"❌ Wafer Modeling 데이터 크롤링 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "timestamp": datetime.now().isoformat(),
+                "source": "wafermodeling",
+                "error": str(e),
+                "data": None
+            }
+    
+    async def _crawl_wafermodeling_data_via_api(self) -> Dict[str, Any]:
+        """웨이퍼 모델링 데이터 크롤링 (API 호출 방식 - 내부 함수)"""
+        try:
+            print("📡 API 호출 방식으로 데이터 수집...")
+            
+            # 1. 웨이퍼 목록 조회 (모든 페이지 수집)
+            all_wafers = []
+            page = 1
+            limit = 100  # 한 번에 많이 가져오기
+            total_wafers_count = 0
+            
+            while True:
+                wafer_list_response = await self.fetch_api_data(f"/wafer/list?page={page}&limit={limit}")
+                
+                if wafer_list_response is None or not isinstance(wafer_list_response, dict):
+                    print(f"⚠️ 페이지 {page} 데이터 없음")
+                    break
+                
+                wafers = wafer_list_response.get("wafers", [])
+                total_wafers_count = wafer_list_response.get("total", 0)
+                
+                if not wafers:
+                    break
+                
+                all_wafers.extend(wafers)
+                print(f"📄 페이지 {page}: {len(wafers)}개 웨이퍼 수집 (전체: {len(all_wafers)}/{total_wafers_count})")
+                
+                # 다음 페이지가 없으면 중단
+                if len(all_wafers) >= total_wafers_count or len(wafers) < limit:
+                    break
+                
+                page += 1
+            
+            # 2. 통계 정보 조회
+            stats_response = await self.fetch_api_data("/wafer/total_status")
+            
+            # 3. 데이터 변환 (프론트엔드 형식에 맞게)
+            formatted_wafers = []
+            for w in all_wafers:
+                lot_name = w.get('lot_name', '')
+                die_count = w.get('die_count', 0)
+                defect_count = w.get('defect_count', 0)
+                good_die = die_count - defect_count
+                
+                # 수율 계산
+                yield_value = None
+                if die_count > 0:
+                    yield_value = round((good_die / die_count) * 100, 1)
+                
+                formatted_wafers.append({
+                    "id": lot_name,
+                    "lot_name": lot_name,
+                    "batch": "BATCH",
+                    "status": "completed" if w.get('total_grade') else "pending",
+                    "yield": yield_value,
+                    "grade": w.get('total_grade'),
+                    "processedAt": w.get('created_at'),
+                    "confidence": float(w.get('confidence', 0)) if w.get('confidence') else None,
+                    "failure_type": w.get('failure_type'),
+                    "waferMapData": {
+                        "good": good_die,
+                        "bad": defect_count,
+                        "total": die_count
+                    },
+                    "imageUrl": w.get('wafer_map')  # Firebase URL
+                })
+            
+            # 4. 통계 계산
+            completed_wafers = [w for w in formatted_wafers if w.get('status') == 'completed']
+            total_good_die = sum(w.get('waferMapData', {}).get('good', 0) for w in completed_wafers)
+            total_bad_die = sum(w.get('waferMapData', {}).get('bad', 0) for w in completed_wafers)
+            total_die = total_good_die + total_bad_die
+            defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
+            
+            # 5. 통계 정보 (API에서 가져온 값 우선 사용)
+            if stats_response and isinstance(stats_response, dict):
+                total_wafers = stats_response.get('totalWafers', len(completed_wafers))
+                # API 통계와 계산된 통계 중 더 정확한 값 사용
+                if stats_response.get('totalDie', 0) > 0:
+                    total_good_die = stats_response.get('totalDie', 0) - stats_response.get('defectCount', 0)
+                    total_bad_die = stats_response.get('defectCount', 0)
+                    total_die = stats_response.get('totalDie', 0)
+                    defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
+            else:
+                total_wafers = len(completed_wafers)
+            
+            # 6. 최종 데이터 구조 생성
+            wafer_data = {
+                "wafers": formatted_wafers,
+                "statistics": {
+                    "total_wafers": total_wafers,
+                    "total_good_die": int(total_good_die),
+                    "total_bad_die": int(total_bad_die),
+                    "defect_rate": defect_rate
+                },
+                "summary": {
+                    "total_wafers": len(formatted_wafers),
+                    "completed_count": len(completed_wafers),
+                    "processing_count": 0,
+                    "pending_count": len(formatted_wafers) - len(completed_wafers)
+                }
+            }
+            
+            # 디버깅: 받은 데이터 확인
+            print(f"🔍 [DEBUG] 크롤러가 수집한 웨이퍼 데이터:")
+            print(f"  - 총 웨이퍼 수: {len(formatted_wafers)}개")
+            print(f"  - 완료된 웨이퍼: {len(completed_wafers)}개")
+            print(f"  - 총 Good Die: {total_good_die}개")
+            print(f"  - 총 Bad Die: {total_bad_die}개")
+            print(f"  - 불량률: {defect_rate}%")
+            if len(formatted_wafers) > 0:
+                print(f"  - 첫 번째 웨이퍼 ID: {formatted_wafers[0].get('id', 'N/A')}")
+            
+            # 7. 크롤러 형식에 맞게 변환
+            result = {
+                "timestamp": datetime.now().isoformat(),
+                "source": "wafermodeling",
+                "data": wafer_data,
+                "summary": {
+                    "total_wafers": len(formatted_wafers),
+                    "crawled_at": datetime.now().isoformat()
+                }
+            }
+            
+            print(f"✅ Wafer Modeling 데이터 크롤링 완료: {len(formatted_wafers)}개 웨이퍼 (API 호출)")
             return result
             
         except Exception as e:
