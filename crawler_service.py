@@ -5,9 +5,29 @@ import json
 import requests
 from typing import Optional, Dict, Any, List
 import os
+import sys
+from builtins import print as _builtin_print
 from dotenv import load_dotenv
 
 load_dotenv()
+
+def _print_safe(*args, **kwargs):
+    """
+    Windows 콘솔(cp949 등)에서 이모지 출력 시 UnicodeEncodeError로 프로세스가 죽는 문제 방지.
+    인코딩 불가 문자는 대체 문자로 치환해서 출력한다.
+    """
+    try:
+        _builtin_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        text = sep.join(str(a) for a in args) + end
+        safe = text.encode(enc, errors="replace").decode(enc, errors="replace")
+        _builtin_print(safe, end="")
+
+# 이 모듈 내부의 print()를 안전 버전으로 오버라이드
+print = _print_safe  # type: ignore
 
 class HBMDataCrawler:
     """HBM Dashboard 각 페이지의 데이터를 크롤링하는 클래스"""
@@ -185,6 +205,19 @@ class HBMDataCrawler:
                     "crawled_at": datetime.now().isoformat()
                 }
             }
+
+            # 모델 선택: DRAM Die(HBM3) 하나로 고정 (프론트에서 이 필드를 사용하면 드롭다운이 1개만 표시됨)
+            model_options = [
+                {
+                    "value": "DRAM Die (HBM3)",
+                    "label": "DRAM Die (HBM3) (DRAM-HBM3-8GB)",
+                }
+            ]
+            result["modelOptions"] = model_options
+            result["selectedModel"] = model_options[0]["value"]
+            if isinstance(inventory_data, dict):
+                inventory_data.setdefault("modelOptions", model_options)
+                inventory_data.setdefault("selectedModel", model_options[0]["value"])
             
             print(f"✅ Inventory 데이터 크롤링 완료: {result['summary']['total_items']}개 항목")
             return result

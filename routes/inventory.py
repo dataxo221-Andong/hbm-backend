@@ -50,6 +50,23 @@ def _fetch_chips(where_sql="", params=None, limit=200, offset=0):
         cur.close()
         conn.close()
 
+def _count_chips(where_sql="", params=None):
+    """필터 조건에 맞는 전체 칩 개수 반환"""
+    conn = get_conn()
+    if conn is None:
+        return None, (jsonify({"error": "데이터베이스 연결 실패"}), 500)
+
+    params = params or []
+    cur = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        sql = f"SELECT COUNT(*) AS total FROM chip_data {where_sql}"
+        cur.execute(sql, params)
+        row = cur.fetchone() or {}
+        return int(row.get("total", 0)), None
+    finally:
+        cur.close()
+        conn.close()
+
 
 def _fetch_one_chip(where_sql, params):
     conn = get_conn()
@@ -92,7 +109,15 @@ def list_chips():
       - failure_type: 불량 유형으로 필터링
       - limit, offset: 페이지네이션
     """
-    limit = _parse_int(request.args.get("limit"), default=200, min_value=1, max_value=1000)
+    # 기본값을 크게 잡아(예: 10,000) UI에서 "전체 칩"을 바로 볼 수 있게 함
+    limit_raw = request.args.get("limit")
+    if isinstance(limit_raw, str) and limit_raw.strip().lower() in ("all", "*"):
+        limit = 100000
+    else:
+        limit = _parse_int(limit_raw, default=10000, min_value=1, max_value=100000)
+        # 프론트가 과거 최대치(1000)로 요청하는 경우가 있어, 1000 이상이면 "전체 요청"으로 취급
+        if limit is not None and limit >= 1000:
+            limit = 100000
     offset = _parse_int(request.args.get("offset"), default=0, min_value=0)
 
     lot_name = (request.args.get("lot_name") or request.args.get("lotName") or "").strip()
@@ -116,10 +141,19 @@ def list_chips():
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
     try:
+        total, err = _count_chips(where_sql=where_sql, params=params)
+        if err:
+            return err
         rows, err = _fetch_chips(where_sql=where_sql, params=params, limit=limit, offset=offset)
         if err:
             return err
-        return jsonify({"chips": rows, "count": len(rows), "limit": limit, "offset": offset}), 200
+        return jsonify({
+            "chips": rows,
+            "count": len(rows),
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
