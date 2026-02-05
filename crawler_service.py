@@ -775,134 +775,86 @@ class HBMDataCrawler:
             return None
     
     async def crawl_wafermodeling_data(self) -> Dict[str, Any]:
-        """웨이퍼 모델링 데이터 크롤링 (웹 API 호출 방식)"""
+        """웨이퍼 모델링 데이터 크롤링 (하이브리드 방식: API 우선, 실패 시 HTML 크롤링)"""
         try:
-            print("🔬 Wafer Modeling 데이터 크롤링 시작 (웹 API 호출)...")
+            print("=" * 60)
+            print("🔬 [하이브리드 크롤링] Wafer Modeling 데이터 수집 시작")
+            print("=" * 60)
             
-            # 1. 웨이퍼 목록 조회 (모든 페이지 수집)
-            all_wafers = []
-            page = 1
-            limit = 100  # 한 번에 많이 가져오기
-            total_wafers_count = 0
-            
-            while True:
-                wafer_list_response = await self.fetch_api_data(f"/wafer/list?page={page}&limit={limit}")
+            # 1단계: API 방식 시도 (빠르고 효율적)
+            print("\n[1단계] API 방식 시도 중...")
+            print("  → 백엔드 REST API 직접 호출")
+            try:
+                api_result = await self._crawl_wafermodeling_data_via_api()
                 
-                if wafer_list_response is None or not isinstance(wafer_list_response, dict):
-                    print(f"⚠️ 페이지 {page} 데이터 없음")
-                    break
-                
-                wafers = wafer_list_response.get("wafers", [])
-                total_wafers_count = wafer_list_response.get("total", 0)
-                
-                if not wafers:
-                    break
-                
-                all_wafers.extend(wafers)
-                print(f"📄 페이지 {page}: {len(wafers)}개 웨이퍼 수집 (전체: {len(all_wafers)}/{total_wafers_count})")
-                
-                # 다음 페이지가 없으면 중단
-                if len(all_wafers) >= total_wafers_count or len(wafers) < limit:
-                    break
-                
-                page += 1
+                # API 방식 성공 확인 (데이터가 있고 에러가 없는 경우)
+                if api_result and api_result.get('data') and not api_result.get('error'):
+                    wafer_data = api_result.get('data', {})
+                    wafers = wafer_data.get('wafers', [])
+                    
+                    if wafers and len(wafers) > 0:
+                        print(f"✅ [성공] API 방식으로 {len(wafers)}개 웨이퍼 수집 완료")
+                        print(f"   → 사용된 방식: REST API 직접 호출")
+                        print(f"   → 수집 시간: 빠름 (API 직접 호출)")
+                        api_result['crawl_method'] = 'API'
+                        api_result['crawl_method_description'] = '백엔드 REST API를 직접 호출하여 데이터를 수집했습니다.'
+                        return api_result
+                    else:
+                        print("⚠️ [실패] API 방식: 데이터는 받았지만 웨이퍼가 없음")
+                else:
+                    print("⚠️ [실패] API 방식: 데이터 수집 실패 또는 에러 발생")
+            except Exception as api_error:
+                print(f"⚠️ [실패] API 방식 오류: {api_error}")
             
-            # 2. 통계 정보 조회
-            stats_response = await self.fetch_api_data("/wafer/total_status")
-            
-            # 3. 데이터 변환 (프론트엔드 형식에 맞게)
-            formatted_wafers = []
-            for w in all_wafers:
-                lot_name = w.get('lot_name', '')
-                die_count = w.get('die_count', 0)
-                defect_count = w.get('defect_count', 0)
-                good_die = die_count - defect_count
+            # 2단계: API 실패 시 HTML 크롤링 방식으로 전환
+            print("\n[2단계] HTML 크롤링 방식으로 전환...")
+            print("  → 프론트엔드 웹 페이지 크롤링 (Selenium)")
+            try:
+                # 동기 함수를 비동기로 실행 (Python 버전 호환성)
+                loop = asyncio.get_event_loop()
+                html_result = await loop.run_in_executor(
+                    None,
+                    self._crawl_wafer_page_html,
+                    f"{self.frontend_url}/wafer"
+                )
                 
-                # 수율 계산
-                yield_value = None
-                if die_count > 0:
-                    yield_value = round((good_die / die_count) * 100, 1)
-                
-                formatted_wafers.append({
-                    "id": lot_name,
-                    "lot_name": lot_name,
-                    "batch": "BATCH",
-                    "status": "completed" if w.get('total_grade') else "pending",
-                    "yield": yield_value,
-                    "grade": w.get('total_grade'),
-                    "processedAt": w.get('created_at'),
-                    "confidence": float(w.get('confidence', 0)) if w.get('confidence') else None,
-                    "failure_type": w.get('failure_type'),
-                    "waferMapData": {
-                        "good": good_die,
-                        "bad": defect_count,
-                        "total": die_count
-                    },
-                    "imageUrl": w.get('wafer_map')  # Firebase URL
-                })
+                if html_result and html_result.get('data'):
+                    wafer_data = html_result.get('data', {})
+                    wafers = wafer_data.get('wafers', [])
+                    
+                    if wafers and len(wafers) > 0:
+                        print(f"✅ [성공] HTML 크롤링 방식으로 {len(wafers)}개 웨이퍼 수집 완료")
+                        print(f"   → 사용된 방식: Selenium 기반 웹 페이지 크롤링")
+                        print(f"   → 수집 시간: 느림 (브라우저 실행 필요)")
+                        html_result['crawl_method'] = 'HTML'
+                        html_result['crawl_method_description'] = '프론트엔드 웹 페이지를 Selenium으로 크롤링하여 데이터를 수집했습니다.'
+                        return html_result
+                    else:
+                        print("⚠️ [실패] HTML 크롤링 방식: 데이터는 받았지만 웨이퍼가 없음")
+                else:
+                    print("⚠️ [실패] HTML 크롤링 방식: 데이터 수집 실패")
+            except Exception as html_error:
+                print(f"⚠️ [실패] HTML 크롤링 방식 오류: {html_error}")
+                import traceback
+                traceback.print_exc()
             
-            # 4. 통계 계산
-            completed_wafers = [w for w in formatted_wafers if w.get('status') == 'completed']
-            total_good_die = sum(w.get('waferMapData', {}).get('good', 0) for w in completed_wafers)
-            total_bad_die = sum(w.get('waferMapData', {}).get('bad', 0) for w in completed_wafers)
-            total_die = total_good_die + total_bad_die
-            defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
-            
-            # 5. 통계 정보 (API에서 가져온 값 우선 사용)
-            if stats_response and isinstance(stats_response, dict):
-                total_wafers = stats_response.get('totalWafers', len(completed_wafers))
-                # API 통계와 계산된 통계 중 더 정확한 값 사용
-                if stats_response.get('totalDie', 0) > 0:
-                    total_good_die = stats_response.get('totalDie', 0) - stats_response.get('defectCount', 0)
-                    total_bad_die = stats_response.get('defectCount', 0)
-                    total_die = stats_response.get('totalDie', 0)
-                    defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
-            else:
-                total_wafers = len(completed_wafers)
-            
-            # 6. 최종 데이터 구조 생성
-            wafer_data = {
-                "wafers": formatted_wafers,
-                "statistics": {
-                    "total_wafers": total_wafers,
-                    "total_good_die": int(total_good_die),
-                    "total_bad_die": int(total_bad_die),
-                    "defect_rate": defect_rate
-                },
-                "summary": {
-                    "total_wafers": len(formatted_wafers),
-                    "completed_count": len(completed_wafers),
-                    "processing_count": 0,
-                    "pending_count": len(formatted_wafers) - len(completed_wafers)
-                }
-            }
-            
-            # 디버깅: 받은 데이터 확인
-            print(f"🔍 [DEBUG] 크롤러가 수집한 웨이퍼 데이터:")
-            print(f"  - 총 웨이퍼 수: {len(formatted_wafers)}개")
-            print(f"  - 완료된 웨이퍼: {len(completed_wafers)}개")
-            print(f"  - 총 Good Die: {total_good_die}개")
-            print(f"  - 총 Bad Die: {total_bad_die}개")
-            print(f"  - 불량률: {defect_rate}%")
-            if len(formatted_wafers) > 0:
-                print(f"  - 첫 번째 웨이퍼 ID: {formatted_wafers[0].get('id', 'N/A')}")
-            
-            # 7. 크롤러 형식에 맞게 변환
-            result = {
+            # 둘 다 실패한 경우
+            print("\n" + "=" * 60)
+            print("❌ [실패] 모든 크롤링 방식 실패")
+            print("   → API 방식: 실패")
+            print("   → HTML 크롤링 방식: 실패")
+            print("=" * 60)
+            return {
                 "timestamp": datetime.now().isoformat(),
                 "source": "wafermodeling",
-                "data": wafer_data,
-                "summary": {
-                    "total_wafers": len(formatted_wafers),
-                    "crawled_at": datetime.now().isoformat()
-                }
+                "crawl_method": "FAILED",
+                "crawl_method_description": "모든 크롤링 방식이 실패했습니다.",
+                "error": "모든 크롤링 방식 실패 (API 및 HTML 크롤링 모두 실패)",
+                "data": None
             }
             
-            print(f"✅ Wafer Modeling 데이터 크롤링 완료: {len(formatted_wafers)}개 웨이퍼 (웹 API 호출)")
-            return result
-            
         except Exception as e:
-            print(f"❌ Wafer Modeling 데이터 크롤링 오류: {e}")
+            print(f"\n❌ [오류] Wafer Modeling 데이터 수집 중 예외 발생: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -1016,7 +968,7 @@ class HBMDataCrawler:
             }
             
             # 디버깅: 받은 데이터 확인
-            print(f"🔍 [DEBUG] 크롤러가 수집한 웨이퍼 데이터:")
+            print(f"🔍 [DEBUG] API 응답으로 받은 웨이퍼 데이터:")
             print(f"  - 총 웨이퍼 수: {len(formatted_wafers)}개")
             print(f"  - 완료된 웨이퍼: {len(completed_wafers)}개")
             print(f"  - 총 Good Die: {total_good_die}개")
@@ -1036,11 +988,11 @@ class HBMDataCrawler:
                 }
             }
             
-            print(f"✅ Wafer Modeling 데이터 크롤링 완료: {len(formatted_wafers)}개 웨이퍼 (API 호출)")
+            print(f"✅ [API 호출 성공] {len(formatted_wafers)}개 웨이퍼 데이터 수집 완료")
             return result
             
         except Exception as e:
-            print(f"❌ Wafer Modeling 데이터 크롤링 오류: {e}")
+            print(f"❌ [API 호출 오류] Wafer Modeling 데이터 수집 중 오류 발생: {e}")
             import traceback
             traceback.print_exc()
             return {

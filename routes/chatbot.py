@@ -365,6 +365,17 @@ StackVision은 HBM(High Bandwidth Memory) 제조 및 관리를 위한 기술 지
 - 불확실한 정보는 명시적으로 표기
 - 한국어로 답변하되 기술 용어는 영문 병기
 
+가독성 규칙 (매우 중요):
+- 각 문단 사이에는 빈 줄을 넣어 구분하세요
+- 숫자는 천 단위 구분 표시를 사용하세요 (예: 63,911개, 23,249개)
+- 통계나 수치는 한 줄에 하나씩 명확하게 표시하세요
+- 리스트나 항목은 줄바꿈으로 명확히 구분하세요
+- 중요한 정보는 **볼드 처리**로 강조하세요
+- 섹션 구분을 위해 특수 기호(•, →, ✓, ■ 등)를 활용하세요
+- "1단계", "2단계" 같은 단계 표기는 최소화하고, 자연스러운 문장으로 작성하세요
+- 불필요한 반복이나 장황한 설명은 피하세요
+- 가독성을 위해 마크다운 문법(**볼드**, *이탤릭* 등)을 적절히 활용하세요
+
 중요 제약사항:
 - 실제 제공된 데이터나 문서에 없는 정보는 절대 생성하지 말 것
 - 확인할 수 없는 정보는 "확인 불가" 또는 "데이터 없음"으로 명시
@@ -570,7 +581,9 @@ def initialize_crawled_data():
     global crawled_data_cache, cache_timestamp
     
     try:
-        print("🚀 챗봇 초기화: 자동 크롤링 시작...")
+        print("\n" + "=" * 60)
+        print("🚀 [챗봇 초기화] 자동 크롤링 시작...")
+        print("=" * 60)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         crawled_data_cache = loop.run_until_complete(crawler.crawl_wafermodeling_data())
@@ -579,11 +592,16 @@ def initialize_crawled_data():
         
         if crawled_data_cache:
             total = crawled_data_cache.get('summary', {}).get('total_wafers', 0)
-            print(f"✅ 초기 크롤링 완료: {total}개 웨이퍼")
+            method = crawled_data_cache.get('crawl_method', 'UNKNOWN')
+            print(f"\n✅ [초기화 완료] {total}개 웨이퍼 수집 완료")
+            print(f"   → 사용된 방식: {method}")
+            print("=" * 60 + "\n")
         else:
-            print("⚠️ 초기 크롤링 결과 없음")
+            print("\n⚠️ [초기화 실패] 크롤링 결과 없음")
+            print("=" * 60 + "\n")
     except Exception as e:
-        print(f"❌ 초기 크롤링 오류: {e}")
+        print(f"\n❌ [초기화 오류] {e}")
+        print("=" * 60 + "\n")
         import traceback
         traceback.print_exc()
         crawled_data_cache = None
@@ -600,9 +618,9 @@ def get_crawled_data(force_refresh=False):
         
         if crawled_data_cache is None or cache_expired or force_refresh:
             if force_refresh or cache_expired:
-                print("🔄 크롤링 데이터 갱신 중...")
+                print("\n🔄 [캐시 갱신] 크롤링 데이터 갱신 중...")
             else:
-                print("📊 크롤링 데이터 수집 중...")
+                print("\n📊 [데이터 수집] 크롤링 데이터 수집 중...")
             
             try:
                 loop = asyncio.new_event_loop()
@@ -613,11 +631,13 @@ def get_crawled_data(force_refresh=False):
                 
                 if crawled_data_cache:
                     total = crawled_data_cache.get('summary', {}).get('total_wafers', 0)
-                    print(f"✅ 크롤링 데이터 수집 완료: {total}개 웨이퍼")
+                    method = crawled_data_cache.get('crawl_method', 'UNKNOWN')
+                    print(f"✅ [수집 완료] {total}개 웨이퍼 수집 완료")
+                    print(f"   → 사용된 방식: {method}\n")
                 else:
-                    print("⚠️ 크롤링 데이터 수집 결과 없음")
+                    print("⚠️ [수집 실패] 크롤링 데이터 수집 결과 없음\n")
             except Exception as e:
-                print(f"❌ 크롤링 데이터 수집 오류: {e}")
+                print(f"❌ [수집 오류] 크롤링 데이터 수집 오류: {e}\n")
                 import traceback
                 traceback.print_exc()
                 # 오류 시 기존 캐시 유지 (있는 경우)
@@ -632,6 +652,22 @@ def background_init():
 # 백그라운드 스레드로 초기화 시작
 init_thread = threading.Thread(target=background_init, daemon=True)
 init_thread.start()
+
+def clean_markdown_from_response(text):
+    """응답에서 불필요한 마크다운만 제거 (볼드와 특수 기호는 유지하여 가독성 향상)"""
+    if not text:
+        return text
+    
+    # 마크다운 코드 블록 제거 (```...``` -> ...) - 먼저 처리
+    text = re.sub(r'```[^`]*```', '', text, flags=re.DOTALL)
+    
+    # 마크다운 링크 제거 ([텍스트](URL) -> 텍스트)
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    
+    # 인라인 코드는 유지 (가독성을 위해)
+    # 볼드(**텍스트**), 이탤릭(*텍스트*), 특수 기호는 모두 유지
+    
+    return text
 
 def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None):
     """Gemini에게 보낼 향상된 프롬프트 생성 (System Instructions + Few-shot + Chain of Thought)"""
@@ -951,11 +987,22 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 4. 구체적인 수치와 데이터가 있으면 포함하세요
 5. 데이터가 없는 경우에는 해당 내용을 언급하지 말고, 있는 데이터만으로 답변하세요
 
+답변 가독성 규칙 (매우 중요):
+- 각 문단 사이에는 빈 줄을 넣어 구분하세요
+- 숫자는 천 단위 구분 표시를 사용하세요 (예: 63,911개, 23,249개)
+- 통계나 수치는 한 줄에 하나씩 표시하세요
+- 리스트나 항목은 줄바꿈으로 명확히 구분하세요
+- 중요한 정보는 **볼드 처리**로 강조하세요
+- 섹션 구분을 위해 특수 기호(•, →, ✓, ■ 등)를 활용하세요
+- "1단계", "2단계" 같은 표기는 최소화하고, 자연스러운 문장으로 작성하세요
+- 가독성을 위해 마크다운 문법(**볼드**, *이탤릭* 등)을 적절히 활용하세요
+- 불필요한 반복이나 장황한 설명은 피하세요
+
 답변 생성 단계:
 1단계: 사용자 질문의 핵심 파악
 2단계: 제공된 데이터에서 관련 정보 검색
 3단계: 데이터 분석 및 계산 (필요시)
-4단계: 명확하고 구조화된 답변 작성
+4단계: 읽기 쉽고 구조화된 답변 작성 (볼드와 특수 기호를 활용하여 가독성 향상)
 """
     
     enhanced_prompt = f"""{system_instruction}
@@ -988,10 +1035,14 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 1. 특정 웨이퍼나 적층 정보가 위에 명시적으로 제공되었다면, 반드시 그 정보를 사용하여 상세히 답변하세요
 2. 데이터가 없는 경우에는 해당 내용을 언급하지 말고, 있는 데이터만으로 답변하세요
 3. 구체적인 수치와 정보가 있으면 반드시 포함하세요 (특히 통계 정보는 정확한 값을 사용)
-4. 답변은 단계별로 구조화하여 작성하세요 (1단계, 2단계 등)
-5. 타임스탬프나 수집 시간 정보는 답변에 포함하지 마세요
-6. **절대로 임의의 값을 생성하지 마세요. 위에 제공된 실제 데이터만 사용하세요.**
-7. **"총 분석 웨이퍼 수" 값이 0개로 표시되어 있으면, "현재 데이터베이스에 웨이퍼 데이터가 없습니다"라고 답변하세요.**"""
+4. 답변은 자연스럽고 읽기 쉽게 작성하세요. 불필요한 "1단계", "2단계" 표기는 최소화하세요
+5. 각 문단 사이에는 빈 줄을 넣어 가독성을 높이세요
+6. 숫자는 천 단위 구분 표시를 사용하세요 (예: 63,911개, 23,249개)
+7. 타임스탬프나 수집 시간 정보는 답변에 포함하지 마세요
+8. 절대로 임의의 값을 생성하지 마세요. 위에 제공된 실제 데이터만 사용하세요
+9. "총 분석 웨이퍼 수" 값이 0개로 표시되어 있으면, "현재 데이터베이스에 웨이퍼 데이터가 없습니다"라고 답변하세요
+10. 가독성을 위해 마크다운 문법(**볼드**, *이탤릭* 등)과 특수 기호(•, →, ✓, ■ 등)를 적절히 활용하세요
+"""
     
     return enhanced_prompt, temperature
 
@@ -1024,6 +1075,8 @@ def chat():
         if intent in ["features", "help", "about"]:
             service_response = get_service_info(intent)
             if service_response:
+                # 마크다운 문법 제거
+                service_response = clean_markdown_from_response(service_response)
                 return jsonify({
                     "message": {
                         "role": "assistant",
@@ -1034,6 +1087,8 @@ def chat():
         # HBM 부품 정보 제공
         elif intent in ["hbm_info"]:
             hbm_response = get_hbm_component_info(user_input)
+            # 마크다운 문법 제거
+            hbm_response = clean_markdown_from_response(hbm_response)
             return jsonify({
                 "message": {
                     "role": "assistant",
@@ -1081,16 +1136,19 @@ def chat():
             response = """
 죄송합니다. 현재 일시적인 오류가 발생했습니다. 😅
 
-🔄 **다시 시도해보시거나 아래 기능을 이용해보세요:**
+🔄 다시 시도해보시거나 아래 기능을 이용해보세요:
 - "기능" 입력 → 서비스 기능 안내
 - "수율" 입력 → 수율 데이터 조회
 - "재고" 입력 → 재고 현황 확인
 - "적층" 입력 → HBM 적층 구조 정보
 - "도움" 입력 → 전체 도움말 보기
 
-💡 **HBM 제조 정보가 필요하시면:**
+💡 HBM 제조 정보가 필요하시면:
 웨이퍼, TSV, 적층, 수율 등의 키워드를 입력해보세요!
             """
+        
+        # 마크다운 문법 제거
+        response = clean_markdown_from_response(response)
         
         return jsonify({
             "message": {
@@ -1103,21 +1161,24 @@ def chat():
         print(f"Chatbot API 오류: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({
-            "message": {
-                "role": "assistant",
-                "content": f"""
-🚨 **서비스 일시 오류**
+        error_response = """
+🚨 서비스 일시 오류
 
 죄송합니다. 잠시 후 다시 시도해주세요.
 
-📞 **지속적인 문제 발생시:**
+📞 지속적인 문제 발생시:
 - 이메일: support@stackvision.com
 - 전화: 02-1234-5678
 
-💡 **기본 도움말:**
+💡 기본 도움말:
 "도움", "기능", "수율", "재고", "적층" 등을 입력해보세요!
-                """
+        """
+        # 마크다운 문법 제거
+        error_response = clean_markdown_from_response(error_response)
+        return jsonify({
+            "message": {
+                "role": "assistant",
+                "content": error_response
             }
         }), 500
 
