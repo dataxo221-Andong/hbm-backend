@@ -5,6 +5,22 @@ from routes.auth import auth_bp
 from dotenv import load_dotenv
 import os
 import socket
+import sys
+from builtins import print as _builtin_print
+
+# Windows 콘솔(cp949 등)에서 이모지 출력 시 UnicodeEncodeError로 서버가 죽는 문제 방지
+def _print_safe(*args, **kwargs):
+    try:
+        _builtin_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        text = sep.join(str(a) for a in args) + end
+        safe = text.encode(enc, errors="replace").decode(enc, errors="replace")
+        _builtin_print(safe, end="")
+
+print = _print_safe  # type: ignore
 
 # 환경 변수 로드
 load_dotenv()
