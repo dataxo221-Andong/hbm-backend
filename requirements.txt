@@ -12,6 +12,11 @@ torchvision
 firebase-admin
 aiohttp
 google-genai
+requests
+beautifulsoup4
+selenium
+webdriver-manager
+
 
 # Stacking Logic Dependencies
 pandas

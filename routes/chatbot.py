@@ -2,9 +2,12 @@ from flask import Blueprint, request, jsonify
 from gemini_handler import get_gemini_response
 from datetime import datetime
 import re
+import json
 import asyncio
 import sys
 import os
+import time
+import threading
 from crawler_service import crawler
 
 # 프로젝트 루트 경로 설정 (wafer.py와 동일한 방식)
@@ -12,10 +15,15 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from db import get_conn
-import pymysql
-
 chatbot_bp = Blueprint("chatbot", __name__)
+
+# ==========================================
+# 전역 캐시 변수 (크롤링 데이터 캐싱)
+# ==========================================
+crawled_data_cache = None
+cache_timestamp = None
+CACHE_DURATION = 300  # 5분 (초 단위)
+_cache_lock = threading.Lock()  # 스레드 안전성을 위한 락
 
 # ==========================================
 # 검색 기능 (코드 레벨)
@@ -49,6 +57,31 @@ def extract_wafer_id_from_input(user_input):
     print(f"🔍 [DEBUG] 웨이퍼 ID 추출 결과: {found_ids}")
     
     return found_ids
+
+def extract_failure_pattern_from_input(user_input):
+    """사용자 입력에서 불량 패턴 키워드 추출"""
+    input_lower = user_input.lower()
+    
+    # 불량 패턴 매핑 (실제 DB 값과 일치하도록)
+    # 실제 DB 값: 'Center', 'Donut', 'Edge-Loc', 'Edge-Ring', 'Loc', 'Near-full', 'Random', 'Scratch', 'None'
+    pattern_map = {
+        "Center": ["센터", "center", "중앙", "중심"],
+        "Edge-Ring": ["엣지링", "edge-ring", "edge ring", "엣지", "가장자리링"],
+        "Edge-Loc": ["edge-loc", "edge loc", "엣지로컬"],
+        "Random": ["랜덤", "random", "무작위"],
+        "Loc": ["loc", "로컬", "로컬불량"],  # Edge-Loc와 구분
+        "Donut": ["도넛", "donut"],
+        "Scratch": ["스크래치", "scratch"],
+        "Near-full": ["near-full", "near full", "거의전체"],
+        "None": ["없음", "none", "정상"],
+    }
+    
+    for pattern, keywords in pattern_map.items():
+        for keyword in keywords:
+            if keyword in input_lower:
+                return pattern  # 실제 DB 값 형식으로 반환 (예: "Loc", "Center")
+    
+    return None
 
 def extract_stack_id_from_input(user_input):
     """사용자 입력에서 적층 ID 추출"""
@@ -414,43 +447,90 @@ HBM 제조 과정의 효율성과 품질을 향상시켜
     }
     return service_info.get(query_type, "")
 
+def analyze_intent_with_ai(user_input):
+    """Gemini AI를 사용한 자동 의도 분류"""
+    try:
+        intent_prompt = f"""사용자의 질문을 분석하여 의도를 분류해주세요.
+
+사용 가능한 의도:
+1. "features" - 서비스 기능 안내 요청 (예: "기능이 뭐야", "무엇을 할 수 있어")
+2. "help" - 도움말 요청 (예: "도움말", "어떻게 사용하나요", "사용법")
+3. "about" - 서비스 소개 요청 (예: "회사 소개", "StackVision이 뭐야")
+4. "yield" - 수율 데이터 관련 질문 (예: "수율은?", "양품률", "생산률")
+5. "inventory" - 재고 관리 관련 질문 (예: "재고 현황", "재고는 얼마나")
+6. "stack" - 적층 구조 관련 질문 (예: "적층 구조", "스택 정보", "HBM 적층")
+7. "classification" - 웨이퍼 분석/분류/통계 관련 질문 (예: "웨이퍼 분석", "총 웨이퍼 개수", "Good Die 개수", "불량률", "웨이퍼 등급")
+8. "hbm_info" - HBM 기술 정보 질문 (예: "TSV란", "HBM이 뭐야", "다이 설명")
+9. "general" - 일반적인 질문 (위에 해당하지 않는 모든 질문)
+
+사용자 질문: "{user_input}"
+
+위 질문의 의도를 정확히 하나만 선택하여 JSON 형식으로 답변해주세요:
+{{"intent": "의도명"}}
+
+중요:
+- 웨이퍼 개수, 통계, 분석 결과를 묻는 질문은 "classification"
+- 수율, 양품률을 묻는 질문은 "yield"
+- 적층 구조, 스택에 대한 질문은 "stack"
+- 재고 현황을 묻는 질문은 "inventory"
+"""
+        
+        # Gemini로 의도 분류 (낮은 temperature로 일관성 확보)
+        response = get_gemini_response(intent_prompt, temperature=0.1)
+        
+        # JSON 파싱
+        
+        # JSON 추출 (중괄호 안의 내용)
+        json_match = re.search(r'\{[^}]+\}', response)
+        if json_match:
+            try:
+                intent_data = json.loads(json_match.group())
+                intent = intent_data.get("intent", "general")
+                
+                # 유효한 의도인지 확인
+                valid_intents = ["features", "help", "about", "yield", "inventory", 
+                               "stack", "classification", "hbm_info", "general"]
+                if intent in valid_intents:
+                    print(f"🤖 AI 의도 분류: '{user_input}' -> {intent}")
+                    return intent
+            except json.JSONDecodeError:
+                print(f"⚠️ JSON 파싱 실패: {json_match.group()}")
+        
+        # 파싱 실패 시 기본값
+        print(f"⚠️ 의도 분류 실패, 기본값 'general' 사용")
+        return "general"
+        
+    except Exception as e:
+        print(f"⚠️ AI 의도 분류 오류: {e}, 기본값 'general' 사용")
+        return "general"
+
 def analyze_user_intent(user_input):
-    """사용자 의도 분석"""
+    """하이브리드 의도 분석 (키워드 빠른 매칭 + AI 자동 분류)"""
     input_lower = user_input.lower()
     
-    # 기능 안내
-    if any(keyword in input_lower for keyword in ["기능", "특징", "feature", "서비스", "뭐", "할수있", "가능", "기능소개"]):
-        return "features"
+    # 1단계: 명확한 키워드는 빠르게 처리 (성능 최적화)
+    quick_keywords = {
+        "features": ["기능", "특징", "feature", "서비스", "뭐", "할수있", "가능", "기능소개"],
+        "help": ["도움", "help", "어떻게", "방법", "문의", "문의사항", "사용법"],
+        "about": ["소개", "about", "회사", "stackvision", "무엇", "소개해줘"],
+        "yield": ["수율", "yield", "양품률", "생산률"],
+        "inventory": ["재고", "inventory", "stock", "현황"],
+        "stack": ["적층", "stack", "hbm", "스택"],
+    }
     
-    # 도움말
-    if any(keyword in input_lower for keyword in ["도움", "help", "어떻게", "방법", "문의", "문의사항"]):
-        return "help"
+    for intent, keywords in quick_keywords.items():
+        if any(kw in input_lower for kw in keywords):
+            print(f"⚡ 키워드 매칭: '{user_input}' -> {intent}")
+            return intent
     
-    # 서비스 소개
-    if any(keyword in input_lower for keyword in ["소개", "about", "회사", "stackvision", "무엇", "소개해줘"]):
-        return "about"
+    # 2단계: 명확하지 않은 경우 Gemini AI 사용
+    # 웨이퍼 관련 질문은 키워드가 겹칠 수 있으므로 AI로 정확히 분류
+    if any(kw in input_lower for kw in ["웨이퍼", "wafer", "분류", "classify", "총", "개수", "몇개", "얼마나", 
+                                         "불량", "등급", "수율", "die", "다이", "tsv", "hbm", "메모리"]):
+        return analyze_intent_with_ai(user_input)
     
-    # 수율 관련
-    if any(keyword in input_lower for keyword in ["수율", "yield", "양품률", "생산률"]):
-        return "yield"
-    
-    # 재고 관련
-    if any(keyword in input_lower for keyword in ["재고", "inventory", "stock", "현황"]):
-        return "inventory"
-    
-    # 적층 관련
-    if any(keyword in input_lower for keyword in ["적층", "stack", "hbm", "스택"]):
-        return "stack"
-    
-    # 분류 관련 (웨이퍼 개수, 총 개수 등 포함)
-    if any(keyword in input_lower for keyword in ["분류", "classify", "웨이퍼", "wafer", "총", "개수", "몇개", "얼마나"]):
-        return "classification"
-    
-    # HBM 부품 관련
-    if any(keyword in input_lower for keyword in ["웨이퍼", "wafer", "tsv", "다이", "die", "hbm", "메모리"]):
-        return "hbm_info"
-    
-    return "general"
+    # 3단계: 완전히 일반적인 질문도 AI로 분류
+    return analyze_intent_with_ai(user_input)
 
 def get_hbm_component_info(user_input):
     """HBM 부품 관련 일반 정보 제공"""
@@ -481,6 +561,78 @@ def get_hbm_component_info(user_input):
 💡 **더 자세한 정보가 필요하시면 구체적으로 질문해주세요!**
     """
 
+# ==========================================
+# 크롤링 데이터 캐시 관리
+# ==========================================
+
+def initialize_crawled_data():
+    """챗봇 초기화 시 자동으로 크롤링 실행"""
+    global crawled_data_cache, cache_timestamp
+    
+    try:
+        print("🚀 챗봇 초기화: 자동 크롤링 시작...")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        crawled_data_cache = loop.run_until_complete(crawler.crawl_wafermodeling_data())
+        cache_timestamp = time.time()
+        loop.close()
+        
+        if crawled_data_cache:
+            total = crawled_data_cache.get('summary', {}).get('total_wafers', 0)
+            print(f"✅ 초기 크롤링 완료: {total}개 웨이퍼")
+        else:
+            print("⚠️ 초기 크롤링 결과 없음")
+    except Exception as e:
+        print(f"❌ 초기 크롤링 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        crawled_data_cache = None
+
+def get_crawled_data(force_refresh=False):
+    """캐시된 크롤링 데이터 가져오기 (필요시 갱신)"""
+    global crawled_data_cache, cache_timestamp
+    
+    with _cache_lock:
+        # 캐시가 없거나 만료되었거나 강제 갱신 요청 시
+        current_time = time.time()
+        cache_expired = (cache_timestamp is None or 
+                        (current_time - cache_timestamp) > CACHE_DURATION)
+        
+        if crawled_data_cache is None or cache_expired or force_refresh:
+            if force_refresh or cache_expired:
+                print("🔄 크롤링 데이터 갱신 중...")
+            else:
+                print("📊 크롤링 데이터 수집 중...")
+            
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                crawled_data_cache = loop.run_until_complete(crawler.crawl_wafermodeling_data())
+                cache_timestamp = time.time()
+                loop.close()
+                
+                if crawled_data_cache:
+                    total = crawled_data_cache.get('summary', {}).get('total_wafers', 0)
+                    print(f"✅ 크롤링 데이터 수집 완료: {total}개 웨이퍼")
+                else:
+                    print("⚠️ 크롤링 데이터 수집 결과 없음")
+            except Exception as e:
+                print(f"❌ 크롤링 데이터 수집 오류: {e}")
+                import traceback
+                traceback.print_exc()
+                # 오류 시 기존 캐시 유지 (있는 경우)
+        
+        return crawled_data_cache
+
+def background_init():
+    """백그라운드에서 초기화 (서버 시작을 막지 않음)"""
+    time.sleep(2)  # 서버 시작 후 2초 대기
+    initialize_crawled_data()
+
+# 백그라운드 스레드로 초기화 시작
+init_thread = threading.Thread(target=background_init, daemon=True)
+init_thread.start()
+
 def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None):
     """Gemini에게 보낼 향상된 프롬프트 생성 (System Instructions + Few-shot + Chain of Thought)"""
     
@@ -498,6 +650,20 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
             role = "사용자" if msg.get("role") == "user" else "어시스턴트"
             content = msg.get("content", "")
             context_text += f"{role}: {content}\n"
+    
+    # 불량 패턴 필터링 (classification 의도일 때)
+    failure_pattern_filter = None
+    if intent == "classification":
+        failure_pattern_filter = extract_failure_pattern_from_input(user_input)
+        if failure_pattern_filter:
+            print(f"🔍 불량 패턴 필터 감지: {failure_pattern_filter}")
+    
+    # 불량 패턴 필터링 (classification 의도일 때)
+    failure_pattern_filter = None
+    if intent == "classification":
+        failure_pattern_filter = extract_failure_pattern_from_input(user_input)
+        if failure_pattern_filter:
+            print(f"🔍 불량 패턴 필터 감지: {failure_pattern_filter}")
     
     # 웨이퍼/적층 검색 (코드 레벨에서 처리)
     found_wafer = None
@@ -688,9 +854,54 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
                                     wafer_id = w.get('id', 'N/A')
                                     yield_val = w.get('yield', 'N/A')
                                     grade = w.get('grade', 'N/A')
+                                    failure_type = w.get('failure_type', 'N/A')
                                     good_die = w.get('waferMapData', {}).get('good', 0)
                                     bad_die = w.get('waferMapData', {}).get('bad', 0)
-                                    data_summary += f"- {wafer_id}: 수율 {yield_val}%, 등급 {grade}, Good Die {good_die}개, Bad Die {bad_die}개\n"
+                                    data_summary += f"- {wafer_id}: 수율 {yield_val}%, 등급 {grade}, 불량 패턴 {failure_type}, Good Die {good_die}개, Bad Die {bad_die}개\n"
+                                
+                                # 불량 패턴별 통계 추가
+                                failure_type_counts = {}
+                                for w in wafers_list:
+                                    ft = w.get('failure_type')
+                                    if ft:
+                                        failure_type_counts[ft] = failure_type_counts.get(ft, 0) + 1
+                                
+                                if failure_type_counts:
+                                    data_summary += f"\n**불량 패턴별 웨이퍼 개수:**\n"
+                                    for ft, count in sorted(failure_type_counts.items(), key=lambda x: x[1], reverse=True):
+                                        data_summary += f"- {ft}: {count}개\n"
+                                
+                                # 특정 불량 패턴을 가진 웨이퍼 ID 목록 필터링
+                                if failure_pattern_filter:
+                                    filtered_wafers = []
+                                    for w in wafers_list:
+                                        wafer_failure_type = str(w.get('failure_type', '')).strip()
+                                        filter_pattern = failure_pattern_filter.strip()  # 실제 DB 값 형식 (예: "Loc", "Center")
+                                        
+                                        # 대소문자 무시하고 정확히 일치하는지 확인
+                                        wafer_ft_normalized = wafer_failure_type.lower().replace('_', '-').replace(' ', '-')
+                                        filter_ft_normalized = filter_pattern.lower().replace('_', '-').replace(' ', '-')
+                                        
+                                        # 정확히 일치하는 경우만 매칭 (부분 일치 제거)
+                                        if wafer_ft_normalized == filter_ft_normalized:
+                                            filtered_wafers.append(w)
+                                    
+                                    if filtered_wafers:
+                                        data_summary += f"\n**'{failure_pattern_filter}' 불량 패턴을 가진 웨이퍼 목록 (총 {len(filtered_wafers)}개):**\n"
+                                        # 모든 웨이퍼 ID를 나열 (너무 많으면 제한)
+                                        max_show = 100  # 최대 100개까지 표시
+                                        for i, w in enumerate(filtered_wafers[:max_show]):
+                                            wafer_id = w.get('id', 'N/A')
+                                            yield_val = w.get('yield', 'N/A')
+                                            grade = w.get('grade', 'N/A')
+                                            good_die = w.get('waferMapData', {}).get('good', 0)
+                                            bad_die = w.get('waferMapData', {}).get('bad', 0)
+                                            data_summary += f"{i+1}. {wafer_id} (수율: {yield_val}%, 등급: {grade}, Good: {good_die}개, Bad: {bad_die}개)\n"
+                                        
+                                        if len(filtered_wafers) > max_show:
+                                            data_summary += f"\n... 외 {len(filtered_wafers) - max_show}개 웨이퍼 더 있음\n"
+                                    else:
+                                        data_summary += f"\n**참고:** '{failure_pattern_filter}' 불량 패턴을 가진 웨이퍼를 찾을 수 없습니다.\n"
                                 
                             if len(wafers_list) > 5:
                                 data_summary += f"\n... 외 {len(wafers_list) - 5}개 웨이퍼 더 있음\n"
@@ -830,144 +1041,37 @@ def chat():
                 }
             })
         
-        # 데이터 크롤링이 필요한 의도인 경우
-        crawled_data = None
-        if intent in ["yield", "inventory", "stack", "classification"]:
+        # 모든 질문에 대해 크롤링 데이터 사용 (의도와 무관)
+        # 캐시에서 데이터 가져오기 (없으면 자동으로 크롤링)
+        crawled_data = get_crawled_data()
+        
+        # 다른 의도들(yield, inventory, stack)은 필요시 추가 크롤링
+        if intent in ["yield", "inventory", "stack"]:
             try:
-                print(f"📊 [{intent}] 데이터 크롤링 시작...")
+                print(f"📊 [{intent}] 추가 데이터 크롤링 시작...")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 
-                if intent == "classification":
-                    # HTTP 요청 대신 직접 데이터베이스에서 데이터 가져오기 (더 안정적)
-                    try:
-                        conn = get_conn()
-                        if conn is None:
-                            raise Exception("데이터베이스 연결 실패")
-                            
-                        cur = conn.cursor(pymysql.cursors.DictCursor)
-                        
-                        try:
-                            # 전체 웨이퍼 데이터 조회 (wafer.py의 get_all_wafers와 동일한 로직)
-                            cur.execute("""
-                                SELECT 
-                                    lot_name,
-                                    wafer_map,
-                                    failure_type,
-                                    confidence,
-                                    die_count,
-                                    defect_count,
-                                    defect_density,
-                                    total_grade,
-                                    created_at
-                                FROM wafer_data 
-                                ORDER BY created_at DESC
-                            """)
-                            wafers = cur.fetchall()
-                            
-                            # 통계 계산
-                            completed_wafers = [w for w in wafers if w.get('total_grade')]
-                            total_wafers = len(completed_wafers)
-                            total_good_die = sum(w.get('die_count', 0) - w.get('defect_count', 0) 
-                                                for w in completed_wafers)
-                            total_bad_die = sum(w.get('defect_count', 0) for w in completed_wafers)
-                            total_die = total_good_die + total_bad_die
-                            defect_rate = round((total_bad_die / total_die) * 100, 2) if total_die > 0 else 0
-                            
-                            # 프론트엔드 형식에 맞게 변환
-                            formatted_wafers = []
-                            for w in wafers:
-                                good_die = w.get('die_count', 0) - w.get('defect_count', 0)
-                                bad_die = w.get('defect_count', 0)
-                                yield_value = None
-                                if w.get('die_count') and w.get('die_count') > 0:
-                                    yield_value = round((good_die / w.get('die_count', 1)) * 100, 1)
-                                
-                                formatted_wafers.append({
-                                    "id": w.get('lot_name'),
-                                    "batch": "BATCH",
-                                    "status": "completed" if w.get('total_grade') else "pending",
-                                    "yield": yield_value,
-                                    "grade": w.get('total_grade'),
-                                    "processedAt": w.get('created_at').isoformat() if w.get('created_at') else None,
-                                    "confidence": float(w.get('confidence', 0)) if w.get('confidence') else None,
-                                    "failure_type": w.get('failure_type'),
-                                    "waferMapData": {
-                                        "good": good_die,
-                                        "bad": bad_die,
-                                        "total": w.get('die_count', 0)
-                                    }
-                                })
-                            
-                            # 크롤러 형식에 맞게 변환
-                            wafer_data = {
-                                "wafers": formatted_wafers,
-                                "statistics": {
-                                    "total_wafers": total_wafers,
-                                    "total_good_die": total_good_die,
-                                    "total_bad_die": total_bad_die,
-                                    "defect_rate": defect_rate
-                                },
-                                "summary": {
-                                    "total_wafers": len(formatted_wafers),
-                                    "completed_count": total_wafers,
-                                    "processing_count": 0,
-                                    "pending_count": len(formatted_wafers) - total_wafers
-                                }
-                            }
-                            
-                            crawled_data = {
-                                "timestamp": datetime.now().isoformat(),
-                                "source": "wafermodeling",
-                                "data": wafer_data,
-                                "summary": {
-                                    "total_wafers": len(formatted_wafers),
-                                    "crawled_at": datetime.now().isoformat()
-                                }
-                            }
-                            
-                            print(f"✅ [classification] 데이터 크롤링 완료: {len(formatted_wafers)}개 웨이퍼")
-                            if len(formatted_wafers) > 0:
-                                print(f"🔍 [DEBUG] 웨이퍼 목록 샘플 (처음 3개 ID): {[w.get('id', 'N/A') for w in formatted_wafers[:3]]}")
-                            else:
-                                print(f"⚠️ [DEBUG] 웨이퍼 목록이 비어있습니다!")
-                        finally:
-                            cur.close()
-                            conn.close()
-                    except Exception as db_error:
-                        print(f"⚠️ 직접 DB 조회 실패, 크롤러로 대체: {db_error}")
-                        import traceback
-                        traceback.print_exc()
-                        # 직접 호출 실패 시 크롤러 사용 (fallback)
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            crawled_data = loop.run_until_complete(crawler.crawl_wafermodeling_data())
-                            loop.close()
-                        except Exception as crawl_error:
-                            print(f"⚠️ 크롤러 호출도 실패: {crawl_error}")
-                            crawled_data = None
+                if intent == "yield":
+                    additional_data = loop.run_until_complete(crawler.crawl_logs_data())
+                elif intent == "inventory":
+                    additional_data = loop.run_until_complete(crawler.crawl_inventory_data())
+                elif intent == "stack":
+                    additional_data = loop.run_until_complete(crawler.crawl_stacking_data())
                 else:
-                    # 다른 의도들은 기존 방식 유지
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    if intent == "yield":
-                        crawled_data = loop.run_until_complete(crawler.crawl_logs_data())
-                    elif intent == "inventory":
-                        crawled_data = loop.run_until_complete(crawler.crawl_inventory_data())
-                    elif intent == "stack":
-                        crawled_data = loop.run_until_complete(crawler.crawl_stacking_data())
-                    
-                    loop.close()
+                    additional_data = None
                 
-                if crawled_data:
-                    print(f"✅ [{intent}] 데이터 크롤링 완료")
-                else:
-                    print(f"⚠️ [{intent}] 데이터 크롤링 결과 없음")
+                loop.close()
+                
+                # 추가 데이터가 있으면 crawled_data에 병합
+                if additional_data:
+                    if crawled_data is None:
+                        crawled_data = {}
+                    crawled_data[f"{intent}_data"] = additional_data
+                    print(f"✅ [{intent}] 추가 데이터 크롤링 완료")
             except Exception as crawl_error:
-                print(f"⚠️ [{intent}] 데이터 크롤링 오류: {crawl_error}")
-                import traceback
-                traceback.print_exc()
-                crawled_data = None
+                print(f"⚠️ [{intent}] 추가 데이터 크롤링 오류: {crawl_error}")
+                # 오류가 있어도 기본 웨이퍼 데이터는 사용 가능
         
         # 일반적인 질문은 Gemini에게 전달 (향상된 프롬프트 사용)
         enhanced_prompt, temperature = create_enhanced_prompt(user_input, intent, messages, crawled_data)
