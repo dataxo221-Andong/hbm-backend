@@ -254,10 +254,9 @@ def run_stacking_simulation_logic(batch_id):
         # 점수 오름차순 정렬 (낮은게 좋음)
         candidates.sort(key=lambda x: x[0])
         
-        # [핵심] 상위 3개(Top-3) 중에서 랜덤 선택
-        # 점수가 약간 더 나쁘더라도(2등, 3등) 선택될 기회를 주어
-        # 매번 똑같은 "쌍둥이 스택"이 만들어지는 고착화를 깸
-        top_k = candidates[:3]
+        # [핵심] 상위 2개(Top-2) 중에서 랜덤 선택
+        # 3개는 너무 너그러우므로 2개로 좁혀서 품질 향상 유도
+        top_k = candidates[:2]
         return random.choice(top_k)[1]
 
     remaining = list(range(N))
@@ -267,26 +266,79 @@ def run_stacking_simulation_logic(batch_id):
 
     print(f"[Grouping] 그룹화 시작")
 
+    # ==========================================
+    # [Helper] 스택 수율 계산 함수 (중복 로직 분리)
+    # ==========================================
+    def _calculate_stack_yield(group_indices):
+        """
+        주어진 그룹(칩 인덱스 리스트)으로 스택을 쌓았을 때의 최종 수율을 계산
+        """
+        vertical_matrices = []
+        for idx in group_indices:
+            chip_info = df.iloc[idx] # Use df.iloc[idx] to get chip info
+            tsv = chip_info.get('tsv_matrix')
+            if tsv is not None:
+                try:
+                    # 리스트인 경우 numpy로 변환
+                    mat = np.array(tsv) if isinstance(tsv, list) else tsv
+                    if mat.size > 0:
+                        vertical_matrices.append(mat)
+                except:
+                    pass
+        
+        if len(vertical_matrices) == 0:
+            return 0.0
+
+        try:
+            # 1. Vertical Stacking (3D Array)
+            stack_arr = np.array(vertical_matrices)
+            
+            # 2. Vertical Profection (하나라도 1이면 1)
+            merged_defect_map = np.max(stack_arr, axis=0)
+            
+            rows, cols = merged_defect_map.shape
+            total_pins = rows * cols
+            
+            # 3. Redundancy Processing (Repair)
+            # Pad the map with 1s (defects) to handle edges safely
+            padded_map = np.pad(merged_defect_map, pad_width=1, mode='constant', constant_values=1)
+            
+            real_defect_count = 0
+            for r in range(rows):
+                for c in range(cols):
+                    if merged_defect_map[r, c] == 1:
+                        # Check 3x3 neighbors (padded coordinates: r+1, c+1)
+                        neighbors = padded_map[r:r+3, c:c+3]
+                        
+                        # 0(Clean)이 하나라도 있으면 Repair 성공 -> 불량 아님
+                        if np.any(neighbors == 0):
+                            pass 
+                        else:
+                            real_defect_count += 1
+            
+            if total_pins == 0: return 0.0
+            
+            calc_yield = ((total_pins - real_defect_count) / total_pins) * 100.0
+            return calc_yield
+
+        except Exception as e:
+            # print(f"Yield Calc Warning: {e}")
+            return 0.0
+
     while len(remaining) >= group_size and attempt_count < max_attempts:
         attempt_count += 1
         
         # [수정] 1층(Base Die) 랜덤 선택
         rand_idx = random.randrange(len(remaining))
-        seed_candidate = remaining[rand_idx] # 일단 뽑지 않고 인덱스만 확인
+        seed_candidate = remaining[rand_idx] 
 
-        # [Rule] "Best of N" 전략 (다양성 속에서 최선 찾기)
-        # 동일한 Base Die를 가지고 5번 시뮬레이션을 돌려보고, 개중 가장 Cost가 낮은(좋은) 스택을 확정
+        # [Rule] "Best of N" 전략 + [NEW] 수율 필터링
         trial_count = 5
         best_trial_group = None
         best_trial_score = float('inf')
-
-        # 시뮬레이션용 임시 Remaining 리스트는 매번 복사하면 느리므로, 
-        # 후보군 비교만 하고 실제 제거는 확정 후에 진행
         
         for _ in range(trial_count):
-            # 가상의 스택 생성 시도
             temp_remaining = remaining.copy()
-            # seed는 이미 정해짐
             temp_remaining.pop(rand_idx) 
             
             temp_group = [seed_candidate]
@@ -299,7 +351,6 @@ def run_stacking_simulation_logic(batch_id):
                     failed = True
                     break
                 
-                # 점수 계산 (선택된 칩과 바로 아래 칩 간의 Cost)
                 last_chip = temp_group[-1]
                 cost = cost_mat[last_chip, pick]
                 temp_score_sum += cost
@@ -308,8 +359,16 @@ def run_stacking_simulation_logic(batch_id):
                 temp_group.append(pick)
             
             if not failed:
-                # 평균 점수 (낮을수록 좋음)
+                # [NEW] 수율 검증 단계
+                simulated_yield = _calculate_stack_yield(temp_group)
+                
+                # 수율 50% 미만이면 가차없이 탈락 (적층 불가 판정)
+                if simulated_yield < 50.0:
+                    continue
+
                 avg_score = temp_score_sum / (group_size - 1)
+                
+                # 수율이 보장된 후보 중에서 Cost가 가장 낮은 것을 선택
                 if avg_score < best_trial_score:
                     best_trial_score = avg_score
                     best_trial_group = temp_group
@@ -427,54 +486,10 @@ def run_stacking_simulation_logic(batch_id):
                 })
             
             # --- Vertical Stacking Yield & Grade Calculation (Simulation) ---
-            vertical_matrices = []
-            for l in frontend_layer_list:
-                if l['tsv_matrix']:
-                     try:
-                        vertical_matrices.append(np.array(l['tsv_matrix']))
-                     except:
-                        pass
+            # [Modified] 공통 함수 사용하여 최종 수율 계산
+            final_yield = _calculate_stack_yield(grp)
             
-            final_yield = 0.0
             final_grade = "N/A"
-            
-            if len(vertical_matrices) > 0:
-                try:
-                    stack_arr = np.array(vertical_matrices)
-                    # 1. 수직 관통 여부 (하나라도 막히면 불량 후보)
-                    merged_defect_map = np.max(stack_arr, axis=0)
-                    
-                    rows, cols = merged_defect_map.shape
-                    total_pins = rows * cols
-                    
-                    # 2. Redundancy (Repair) Logic
-                    # merged_defect_map[i,j] == 1 인 핀에 대해, 
-                    # 주변 8방향(3x3)에 '수직으로 완벽한(0)' 핀이 하나라도 있으면 구제
-                    
-                    # Pad the map to handle edges easily (padding with 1-defect so we don't repair from outside)
-                    padded_map = np.pad(merged_defect_map, pad_width=1, mode='constant', constant_values=1)
-                    
-                    real_defect_count = 0
-                    
-                    for r in range(rows):
-                        for c in range(cols):
-                            if merged_defect_map[r, c] == 1:
-                                # Check 3x3 neighbors in padded_map
-                                # Center in padded is at [r+1, c+1]
-                                # Slice: r:r+3, c:c+3
-                                neighbors = padded_map[r:r+3, c:c+3]
-                                
-                                # 0(Clean)이 하나라도 있으면 Repair 성공
-                                if np.any(neighbors == 0):
-                                    pass # Repaired!
-                                else:
-                                    real_defect_count += 1
-                    
-                    final_yield = ((total_pins - real_defect_count) / total_pins) * 100.0
-                except Exception as e:
-                     print(f"Yield Calc Error: {e}")
-                     avg_yld = sum(l['chip_yield'] for l in frontend_layer_list) / len(frontend_layer_list)
-                     final_yield = avg_yld
             
             has_critical_defect = any(l['die_status'] == 2 and l['failure_type'] in ['Random', 'Near-full'] for l in frontend_layer_list)
             
