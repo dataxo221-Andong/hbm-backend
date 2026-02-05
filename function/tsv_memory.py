@@ -39,7 +39,11 @@ def gen_center(shape):
     radius = random.uniform(6, 10)
     y_idx, x_idx = np.ogrid[:h, :w]
     mask = (x_idx - cx) ** 2 + (y_idx - cy) ** 2 <= radius**2
-    prob_mask = np.random.rand(h, w) < random.uniform(0.95, 1.0)
+    
+    # [수정] 밀도를 40~60%로 낮춤 (기존 95% 이상) -> 덜 빽빽하게
+    density = random.uniform(0.4, 0.6)
+    prob_mask = np.random.rand(h, w) < density
+    
     matrix[mask & prob_mask] = 1
     return _add_background_noise(matrix)
 
@@ -53,7 +57,11 @@ def gen_donut(shape):
     y_idx, x_idx = np.ogrid[:h, :w]
     dist_sq = (x_idx - cx) ** 2 + (y_idx - cy) ** 2
     mask = (dist_sq >= r_in**2) & (dist_sq <= r_out**2)
-    prob_mask = np.random.rand(h, w) < random.uniform(0.9, 1.0)
+    
+    # [수정] 밀도를 40~60%로 낮춤
+    density = random.uniform(0.4, 0.6)
+    prob_mask = np.random.rand(h, w) < density
+    
     matrix[mask & prob_mask] = 1
     return _add_background_noise(matrix)
 
@@ -62,12 +70,19 @@ def gen_edge_ring(shape):
     matrix = np.zeros(shape, dtype=np.uint8)
     h, w = shape
     thickness = random.randint(2, 4)
-    matrix[:thickness, :] = 1
-    matrix[-thickness:, :] = 1
-    matrix[:, :thickness] = 1
-    matrix[:, -thickness:] = 1
-    gap_prob = np.random.rand(h, w)
-    matrix[gap_prob < 0.03] = 0
+    
+    # 테두리 마스크 생성
+    border_mask = np.zeros(shape, dtype=bool)
+    border_mask[:thickness, :] = True
+    border_mask[-thickness:, :] = True
+    border_mask[:, :thickness] = True
+    border_mask[:, -thickness:] = True
+    
+    # [수정] 테두리를 꽉 채우지 않고 40~60%만 채움
+    density = random.uniform(0.4, 0.6)
+    prob_mask = np.random.rand(h, w) < density
+    
+    matrix[border_mask & prob_mask] = 1
     return _add_background_noise(matrix)
 
 
@@ -86,7 +101,12 @@ def gen_edge_loc(shape):
         cx, cy = w, random.randint(5, h - 5)
     y_idx, x_idx = np.ogrid[:h, :w]
     mask = (x_idx - cx) ** 2 + (y_idx - cy) ** 2 <= cluster_r**2
-    matrix[mask] = 1
+    
+    # [수정] 밀도 낮춤
+    density = random.uniform(0.4, 0.6)
+    prob_mask = np.random.rand(h, w) < density
+    
+    matrix[mask & prob_mask] = 1
     return _add_background_noise(matrix)
 
 
@@ -97,7 +117,12 @@ def gen_loc(shape):
     radius = random.uniform(3, 6)
     y_idx, x_idx = np.ogrid[:h, :w]
     mask = (x_idx - cx) ** 2 + (y_idx - cy) ** 2 <= radius**2
-    matrix[mask] = 1
+    
+    # [수정] 밀도 낮춤
+    density = random.uniform(0.4, 0.6)
+    prob_mask = np.random.rand(h, w) < density
+    
+    matrix[mask & prob_mask] = 1
     return _add_background_noise(matrix)
 
 
