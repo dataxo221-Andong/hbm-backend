@@ -482,7 +482,9 @@ def run_stacking_simulation_logic(batch_id):
                     "failure_type": raw_failure_type,
                     "die_status": int(float(row.get('die_status', 2))) if row.get('die_status') else 2,
                     "tsv_matrix": tsv_val,
-                    "chip_yield": chip_yield
+                    "chip_yield": chip_yield,
+                    "chip_yield": chip_yield,
+                    "created_at": str(row.get('created_at', current_time_str))  # [수정] 칩 원본 생성 시간
                 })
             
             # --- Vertical Stacking Yield & Grade Calculation (Simulation) ---
@@ -588,15 +590,24 @@ def get_result(tsv_num):
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # [수정] chip_data와 조인하여 원본 칩 생성 시간(created_at) 조회
         sql = """
-            SELECT group_number, position_in_group, chip_uid, failure_type, die_status, tsv_status
-            FROM grouped_data
-            WHERE tsv_num = %s
-            ORDER BY group_number, position_in_group
+            SELECT 
+                g.group_number, 
+                g.position_in_group, 
+                g.chip_uid, 
+                g.failure_type, 
+                g.die_status, 
+                g.tsv_status,
+                c.created_at as chip_created_at
+            FROM grouped_data g
+            LEFT JOIN chip_data c ON g.chip_uid = c.chip_uid
+            WHERE g.tsv_num = %s
+            ORDER BY g.group_number, g.position_in_group
         """
         cur.execute(sql, (tsv_num,))
         rows = cur.fetchall()
-        
+            
         stacks_map = {}
         for r in rows:
             if isinstance(r, dict):
@@ -606,6 +617,7 @@ def get_result(tsv_num):
                 ftype = r['failure_type']
                 dstatus = r['die_status']
                 tstatus_str = r['tsv_status']
+                c_created = r.get('chip_created_at')
             else:
                 g_num = r[0]
                 pos = r[1]
@@ -613,6 +625,7 @@ def get_result(tsv_num):
                 ftype = r[3]
                 dstatus = r[4]
                 tstatus_str = r[5]
+                c_created = r[6]
             
             if g_num not in stacks_map:
                 stacks_map[g_num] = []
@@ -656,7 +669,8 @@ def get_result(tsv_num):
                 "failure_type": ftype,
                 "die_status": ds,
                 "tsv_matrix": tsv_matrix,
-                "chip_yield": chip_yield
+                "chip_yield": chip_yield,
+                "created_at": str(c_created) if c_created else "N/A"
             }
             stacks_map[g_num].append(layer)
 
