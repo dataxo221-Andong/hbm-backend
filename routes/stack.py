@@ -443,6 +443,9 @@ def run_stacking_simulation_logic(batch_id):
                 cx = str(row.get('coor_x', '0'))
                 cy = str(row.get('coor_y', '0'))
                 
+                # [Modified] 공통 함수 사용하여 최종 수율 계산 (DB 저장을 위해 미리 계산)
+                final_yield = _calculate_stack_yield(grp)
+
                 values_to_insert.append((
                     current_tsv_num,  # [추가] 시뮬레이션 회차 번호
                     g_idx + 1, 
@@ -456,7 +459,8 @@ def run_stacking_simulation_logic(batch_id):
                     str(row.get('die_status', '')), 
                     f"{cx},{cy}", 
                     cx, 
-                    cy
+                    cy,
+                    final_yield # [추가] stack_yield
                 ))
                 
                 # Calculate Chip Yield
@@ -509,8 +513,8 @@ def run_stacking_simulation_logic(batch_id):
             sql = """
                 INSERT INTO grouped_data 
                 (tsv_num, group_number, position_in_group, data_index, chip_uid, lot_name, 
-                 failure_type, created_at, tsv_status, die_status, tsv_coordinate, coor_x, coor_y)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 failure_type, created_at, tsv_status, die_status, tsv_coordinate, coor_x, coor_y, stack_yield)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             cur.executemany(sql, values_to_insert)
             
@@ -614,7 +618,7 @@ def get_result(tsv_num):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # [수정] chip_data와 조인하여 원본 칩 생성 시간(created_at) 조회
+        # [수정] chip_data와 조인하여 원본 칩 생성 시간(created_at) 조회 + stack_yield 조회
         sql = """
             SELECT 
                 g.group_number, 
@@ -623,7 +627,8 @@ def get_result(tsv_num):
                 g.failure_type, 
                 g.die_status, 
                 g.tsv_status,
-                c.created_at as chip_created_at
+                c.created_at as chip_created_at,
+                g.stack_yield
             FROM grouped_data g
             LEFT JOIN chip_data c ON g.chip_uid = c.chip_uid
             WHERE g.tsv_num = %s
@@ -633,6 +638,9 @@ def get_result(tsv_num):
         rows = cur.fetchall()
             
         stacks_map = {}
+        # 스택별 저장된 수율을 담아둘 맵
+        stack_yield_map = {}
+        
         for r in rows:
             if isinstance(r, dict):
                 g_num = r['group_number']
@@ -642,6 +650,7 @@ def get_result(tsv_num):
                 dstatus = r['die_status']
                 tstatus_str = r['tsv_status']
                 c_created = r.get('chip_created_at')
+                s_yield = r.get('stack_yield')
             else:
                 g_num = r[0]
                 pos = r[1]
@@ -650,9 +659,14 @@ def get_result(tsv_num):
                 dstatus = r[4]
                 tstatus_str = r[5]
                 c_created = r[6]
+                s_yield = r[7]
             
             if g_num not in stacks_map:
                 stacks_map[g_num] = []
+            
+            # 저장된 수율이 있으면 맵에 기록 (모든 레이어가 같은 값을 가질 것임)
+            if s_yield is not None:
+                stack_yield_map[g_num] = float(s_yield)
             
             # die_status 처리
             try:
@@ -703,56 +717,57 @@ def get_result(tsv_num):
             layers = stacks_map[g_num]
             
             # --- [NEW] Vertical Stacking Yield & Grade Calculation ---
-            # 1. Collect all TSV matrices
-            matrices = []
-            for l in layers:
-                if l['tsv_matrix'] and len(l['tsv_matrix']) > 0:
-                    try:
-                        matrices.append(np.array(l['tsv_matrix']))
-                    except:
-                        pass
             
+            # 1. DB에 저장된 값이 있으면 우선 사용
             final_yield = 0.0
-            final_grade = "N/A"
-            
-            if len(matrices) > 0:
-                try:
-                    # Assumption: All matrices are same size (e.g. 32x32)
-                    # Stack them along a new axis: (8, 32, 32)
-                    stack_arr = np.array(matrices)
-                    
-                    # 1. Vertical Connectivity Check (Candidates for defect)
-                    merged_defect_map = np.max(stack_arr, axis=0) # 0 or 1
-                    
-                    rows, cols = merged_defect_map.shape
-                    total_pins = rows * cols
-                    
-                    # 2. Redundancy Logic (Repair Check)
-                    padded_map = np.pad(merged_defect_map, pad_width=1, mode='constant', constant_values=1)
-                    real_defect_count = 0
-                    
-                    for r in range(rows):
-                        for c in range(cols):
-                            if merged_defect_map[r, c] == 1:
-                                # Check 3x3 neighbors
-                                neighbors = padded_map[r:r+3, c:c+3]
-                                if np.any(neighbors == 0):
-                                    pass # Repaired
-                                else:
-                                    real_defect_count += 1
-                                    
-                    final_yield = ((total_pins - real_defect_count) / total_pins) * 100.0
-                    
-                except Exception as e:
-                    print(f"Stack Calc Error: {e}")
-                    # Fallback: average of individual yields
-                    individual_yields = [l['chip_yield'] for l in layers]
-                    final_yield = sum(individual_yields) / len(individual_yields) if individual_yields else 0.0
+            if g_num in stack_yield_map:
+                 final_yield = stack_yield_map[g_num]
+            else:
+                # 저장된 값이 없으면 (옛날 데이터 등) 직접 계산
+                # 1. Collect all TSV matrices
+                matrices = []
+                for l in layers:
+                    if l['tsv_matrix'] and len(l['tsv_matrix']) > 0:
+                        try:
+                            matrices.append(np.array(l['tsv_matrix']))
+                        except:
+                            pass
+                
+                if len(matrices) > 0:
+                    try:
+                        # Assumption: All matrices are same size (e.g. 32x32)
+                        # Stack them along a new axis: (8, 32, 32)
+                        stack_arr = np.array(matrices)
+                        
+                        # 1. Vertical Connectivity Check (Candidates for defect)
+                        merged_defect_map = np.max(stack_arr, axis=0) # 0 or 1
+                        
+                        rows, cols = merged_defect_map.shape
+                        total_pins = rows * cols
+                        
+                        # 2. Redundancy Logic (Repair Check)
+                        padded_map = np.pad(merged_defect_map, pad_width=1, mode='constant', constant_values=1)
+                        real_defect_count = 0
+                        
+                        for r in range(rows):
+                            for c in range(cols):
+                                if merged_defect_map[r, c] == 1:
+                                    # Check 3x3 neighbors
+                                    neighbors = padded_map[r:r+3, c:c+3]
+                                    if np.any(neighbors == 0):
+                                        pass # Repaired
+                                    else:
+                                        real_defect_count += 1
+                                        
+                        final_yield = ((total_pins - real_defect_count) / total_pins) * 100.0
+                        
+                    except Exception as e:
+                        print(f"Stack Calc Error: {e}")
+                        # Fallback: average of individual yields
+                        individual_yields = [l['chip_yield'] for l in layers]
+                        final_yield = sum(individual_yields) / len(individual_yields) if individual_yields else 0.0
 
-            # 3. Grading Logic
-            # A: Yield >= 96% AND All layers are Normal(1)
-            # B: Yield >= 90%
-            # C: Yield < 90% OR Critical Defect Exists
+            final_grade = "N/A"
             
             # [수정] Grading Logic Simplified (Yield Only)
             # A: >= 96.0
