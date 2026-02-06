@@ -228,11 +228,8 @@ def run_stacking_simulation_logic(batch_id):
                 if candidate_type == last_type:
                     continue
                 
-                # Rule 2: 한 스택 내 최대 2개까지만 허용 (더 다양하게 섞이도록 유도)
-                # 단, 데이터가 너무 부족해서 2개 제한으로는 그룹을 못 만드는 경우를 대비해 
-                # 초기에는 엄격하게 하되, 정 안되면 나중에 완화하는 전략이 필요하지만
-                # 일단 사용자 요청대로 엄격하게 2개로 제한.
-                if group_types.count(candidate_type) >= 2:
+                # Rule 2: 한 스택 내 최대 3개까지만 허용 (더 다양하게 섞이도록 유도)
+                if group_types.count(candidate_type) >= 3:
                     continue
             
             # 기존 Cost 및 Forbidden Pairs 체크
@@ -362,8 +359,8 @@ def run_stacking_simulation_logic(batch_id):
                 # [NEW] 수율 검증 단계
                 simulated_yield = _calculate_stack_yield(temp_group)
                 
-                # 수율 50% 미만이면 가차없이 탈락 (적층 불가 판정)
-                if simulated_yield < 50.0:
+                # 수율 85% 미만이면 가차없이 탈락 (적층 불가 판정)
+                if simulated_yield < 85.0:
                     continue
 
                 avg_score = temp_score_sum / (group_size - 1)
@@ -520,6 +517,34 @@ def run_stacking_simulation_logic(batch_id):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             cur.executemany(sql, values_to_insert)
+            
+            # --- [NEW] Simulation Log Summary Insert ---
+            # 시뮬레이션 결과를 요약하여 로그 테이블에 저장 (페이지 3 로딩 속도 최적화)
+            total_stk = len(stacks_result)
+            if total_stk > 0:
+                sum_yield = sum([s['final_yield'] for s in stacks_result])
+                avg_val = sum_yield / total_stk
+                
+                cnt_a = sum([1 for s in stacks_result if s['final_grade'] == 'A'])
+                cnt_b = sum([1 for s in stacks_result if s['final_grade'] == 'B'])
+                cnt_c = sum([1 for s in stacks_result if s['final_grade'] == 'C'])
+                
+                log_sql = """
+                    INSERT INTO simulation_log 
+                    (tsv_num, created_at, total_stacks, avg_yield, grade_a, grade_b, grade_c)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """
+                cur.execute(log_sql, (
+                    current_tsv_num, 
+                    current_time_str, 
+                    total_stk, 
+                    avg_val, 
+                    cnt_a, 
+                    cnt_b, 
+                    cnt_c
+                ))
+            # -------------------------------------------
+
             conn.commit()
             print(f"[Debug] DB Insert Success: {len(values_to_insert)} rows (tsv_num={current_tsv_num}).")
             
@@ -552,12 +577,15 @@ def analyze_stack():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
+
 @stack_bp.route("/list", methods=["GET"])
 def list_history():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # tsv_num 별로 그룹화하여 가장 최근 시간과 스택 수 조회
+        # [원복] grouped_data를 직접 조회하여 모든 이력(1번 포함)이 나오도록 수정
+        # 시각화 페이지 드롭다운용 (원본 데이터 기준)
         sql = """
             SELECT tsv_num, MAX(created_at) as created_at, COUNT(DISTINCT group_number) as stack_count 
             FROM grouped_data 

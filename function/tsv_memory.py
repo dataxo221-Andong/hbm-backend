@@ -137,11 +137,11 @@ def gen_scratch(shape):
         cv2.line(matrix, p1, p2, 1, thickness)
     noise = np.random.rand(h, w)
     matrix[noise < 0.05] = 0
-    return matrix
+    return _add_background_noise(matrix)
 
 
 def gen_random(shape):
-    density = random.uniform(0.1, 0.3)
+    density = random.uniform(0.25, 0.45)
     matrix = np.random.choice([0, 1], size=shape, p=[1 - density, density])
     return matrix.astype(np.uint8)
 
