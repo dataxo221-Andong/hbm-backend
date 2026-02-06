@@ -183,7 +183,7 @@ def get_gemini_response(prompt: str, use_chat_session: bool = False, max_retries
                             "temperature": temperature,
                             "top_p": top_p,
                             "top_k": top_k,
-                            "max_output_tokens": 2048,
+                            "max_output_tokens": 8192,  # 2048에서 8192로 증가 (긴 응답 지원)
                             "system_instruction": system_instruction
                         }
                     )
@@ -204,7 +204,7 @@ def get_gemini_response(prompt: str, use_chat_session: bool = False, max_retries
                             "temperature": temperature,
                             "top_p": top_p,
                             "top_k": top_k,
-                            "max_output_tokens": 2048,
+                            "max_output_tokens": 8192,  # 2048에서 8192로 증가 (긴 응답 지원)
                             "system_instruction": system_instruction
                         }
                     )

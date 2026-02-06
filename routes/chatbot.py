@@ -85,9 +85,10 @@ def extract_failure_pattern_from_input(user_input):
 
 def extract_stack_id_from_input(user_input):
     """사용자 입력에서 적층 ID 추출"""
-    # 적층 ID 패턴: STACK_1, STACK_2, 스택1, 스택 1 등
+    # 적층 ID 패턴: STACK_1, STACK_2, STACK_DB_2_3, 스택1, 스택 1 등
     patterns = [
-        r'STACK[_\s]*(\d+)',  # STACK_1, STACK_2
+        r'(STACK_DB[_\s]*\d+[_\s]*\d+)',  # STACK_DB_2_3 형식 (전체 추출)
+        r'(STACK[_\s]*\d+)',  # STACK_1, STACK_2 (전체 추출)
         r'스택[_\s]*(\d+)',  # 스택1, 스택 1
         r'적층[_\s]*(\d+)',  # 적층1, 적층 1
         r'\b(\d+)\s*번\s*스택',  # 1번 스택
@@ -99,7 +100,8 @@ def extract_stack_id_from_input(user_input):
         matches = re.findall(pattern, user_input.upper())
         found_ids.extend(matches)
     
-    # 중복 제거
+    # 중복 제거 및 정규화 (공백을 언더스코어로, 연속 언더스코어 제거)
+    found_ids = [id.replace(' ', '_').replace('__', '_') for id in found_ids]
     found_ids = list(set(found_ids))
     
     return found_ids
@@ -113,10 +115,19 @@ def find_wafer_in_data(wafer_ids, crawled_data):
         return None
     
     try:
-        # 웨이퍼 데이터 추출
+        # 웨이퍼 데이터 추출 (새로운 캐시 구조 지원)
         wafer_list = []
         if isinstance(crawled_data, dict):
-            if "data" in crawled_data:
+            # 경로 1: 새로운 캐시 구조 (crawl_all_dashboard_data() 결과)
+            if "wafermodeling" in crawled_data:
+                wafermodeling_data = crawled_data.get("wafermodeling", {})
+                if isinstance(wafermodeling_data, dict):
+                    data = wafermodeling_data.get("data", {})
+                    if isinstance(data, dict) and "wafers" in data:
+                        wafer_list = data.get("wafers", [])
+            
+            # 경로 2: 기존 경로 확인 (하위 호환성)
+            if not wafer_list and "data" in crawled_data:
                 data = crawled_data.get("data", {})
                 if isinstance(data, dict) and "wafers" in data:
                     wafer_list = data.get("wafers", [])
@@ -172,48 +183,85 @@ def find_wafer_in_data(wafer_ids, crawled_data):
         return None
 
 def find_stack_in_data(stack_ids, crawled_data):
-    """크롤링된 데이터에서 적층 찾기"""
+    """크롤링된 데이터에서 적층 찾기 (새로운 캐시 구조 지원)"""
     if not crawled_data or not stack_ids:
         return None
     
     try:
         # 적층 데이터 추출
         stack_list = []
+        
+        # 새로운 캐시 구조 확인 (crawl_all_dashboard_data() 결과)
         if isinstance(crawled_data, dict):
-            if "data" in crawled_data:
+            # 경로 1: crawled_data["stacking"]["data"]["latest_result"]["stacks"]
+            if "stacking" in crawled_data:
+                stacking_data = crawled_data.get("stacking", {})
+                if isinstance(stacking_data, dict):
+                    data = stacking_data.get("data", {})
+                    if isinstance(data, dict):
+                        latest_result = data.get("latest_result", {})
+                        if isinstance(latest_result, dict) and "stacks" in latest_result:
+                            stack_list = latest_result.get("stacks", [])
+                        elif "stacks" in data:
+                            stack_list = data.get("stacks", [])
+            
+            # 경로 2: 기존 경로 확인 (하위 호환성)
+            if not stack_list and "data" in crawled_data:
                 data = crawled_data.get("data", {})
                 if isinstance(data, dict) and "stacks" in data:
                     stack_list = data.get("stacks", [])
                 elif isinstance(data, list):
                     stack_list = data
+            
+            # 경로 3: stack_data 키를 통한 접근 (하위 호환성)
+            if not stack_list and "stack_data" in crawled_data:
+                stack_data = crawled_data.get("stack_data", {})
+                if isinstance(stack_data, dict):
+                    if "data" in stack_data:
+                        data = stack_data.get("data", {})
+                        if isinstance(data, dict):
+                            latest_result = data.get("latest_result", {})
+                            if isinstance(latest_result, dict) and "stacks" in latest_result:
+                                stack_list = latest_result.get("stacks", [])
+                            elif "stacks" in data:
+                                stack_list = data.get("stacks", [])
         
         if not stack_list:
+            print(f"⚠️ [DEBUG] 스택 리스트가 비어있음. crawled_data 키: {list(crawled_data.keys()) if isinstance(crawled_data, dict) else 'N/A'}")
             return None
+        
+        print(f"🔍 [DEBUG] 총 {len(stack_list)}개 스택 발견")
         
         # 적층 검색 인덱스 생성
         stack_index = {}
         for stack in stack_list:
             stack_id = str(stack.get("stack_id", "")).upper()
-            # STACK_1, STACK_2 형식에서 숫자만 추출
-            stack_num_match = re.search(r'(\d+)', stack_id)
-            if stack_num_match:
-                stack_num = stack_num_match.group(1)
-                stack_index[stack_num] = stack
-                stack_index[stack_id] = stack
+            if not stack_id:
+                continue
+            
+            # 전체 스택 ID를 인덱스에 추가
+            stack_index[stack_id] = stack
+        
+        print(f"🔍 [DEBUG] 인덱스 생성 완료. 키 샘플: {list(stack_index.keys())[:10]}")
         
         # 사용자 입력에서 추출한 ID로 검색
         for stack_id in stack_ids:
-            search_key = str(stack_id).strip()
+            search_key = str(stack_id).strip().upper()
+            print(f"🔍 [DEBUG] 검색 시도: '{search_key}'")
             
-            # 숫자로 직접 검색
+            # 전체 스택 ID로 직접 검색 (STACK_DB_2_1 형식 포함)
             if search_key in stack_index:
+                print(f"✅ [DEBUG] 정확히 일치하는 스택 찾음: {search_key}")
                 return stack_index[search_key]
             
-            # STACK_ 형식으로 검색
+            # STACK_ 형식으로 검색 (기존 호환성)
             stack_key = f"STACK_{search_key}"
             if stack_key in stack_index:
+                print(f"✅ [DEBUG] STACK_ 형식으로 스택 찾음: {stack_key}")
                 return stack_index[stack_key]
         
+        print(f"⚠️ [DEBUG] 스택을 찾을 수 없음. 검색한 ID: {stack_ids}")
+        print(f"⚠️ [DEBUG] 사용 가능한 스택 ID 샘플: {list(stack_index.keys())[:20]}")
         return None
     except Exception as e:
         print(f"적층 검색 오류: {e}")
@@ -322,6 +370,10 @@ Few-shot 예시:
         "system": """당신은 HBM 적층 구조 전문가입니다.
 현재 적층 구조 페이지에서는 3D 적층 기술, TSV 정렬, 적층 성공률 등을 분석합니다.
 
+**중요: HBM 스택 레이어 개수 규칙**
+HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표준입니다.
+**답변 시 레이어 개수를 명시적으로 언급하지 마세요.** 모든 HBM 스택이 항상 8개이므로 "총 8개 레이어로 구성되어 있습니다" 같은 문구는 불필요합니다.
+
 주요 기능:
 - 3D 적층 구조 시각화
 - TSV(Through Silicon Via) 정렬 상태 확인
@@ -329,10 +381,23 @@ Few-shot 예시:
 - 적층 공정 모니터링
 
 답변 시 다음 정보를 우선적으로 활용하세요:
-1. 적층 구조: 층 수, 다이 배치, TSV 연결
-2. 적층 성공률: 성공/실패 비율
-3. TSV 정렬: 정렬 정확도, 오차 범위
-4. 공정 개선: 적층 성공률 향상 방안
+1. 적층 구조: 레이어 수(항상 8개), Chip ID 목록, TSV 연결
+2. 각 레이어의 Chip ID: 반드시 모든 레이어의 Chip ID를 명시적으로 나열
+3. 적층 성공률: 성공/실패 비율
+4. TSV 정렬: 정렬 정확도, 오차 범위
+5. 공정 개선: 적층 성공률 향상 방안
+
+**중요 규칙:**
+- 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 불필요합니다.
+- 레이어 표기는 영어로 "Layer 1", "Layer 2", "Layer 3" 형식으로 표시하세요. "DRAM 1" 또는 "레이어 1" 같은 표현은 사용하지 마세요.
+- 사용자가 "정보 알려줘"라고 요청하면, 핵심 정보만 간결하게 제공하세요. 불필요한 정보(TSV 상세 분석, 공정 개선 제안 등)는 포함하지 마세요.
+- 레이어 정보는 한 줄로 간결하게 표시하세요. 불필요한 줄바꿈을 피하세요.
+- 사용자가 "Chip ID를 알려달라", "사용된 chip id", "칩 ID", "칩 전부", "모든 칩", "전체 칩", "사용된 칩" 등을 요청하면, 반드시 모든 레이어의 Chip ID를 모두 나열하세요.
+- 일부만 보여주지 마세요. 반드시 모든 레이어를 나열하세요.
+- 각 칩의 상세 정보(상태, 불량유형)도 반드시 포함하세요.
+- 데이터에 chip_id 필드가 있으면 반드시 포함하여 답변하세요.
+- "Chip ID 정보는 제공되지 않습니다"라고 답변하지 마세요. 데이터에 있으면 반드시 제공하세요.
+- 답변은 반드시 완전하게 작성하세요. 중간에 끊기지 않도록 하세요.
 
 Few-shot 예시:
 질문: "적층 구조는 어떻게 되어있나요?"
@@ -577,7 +642,7 @@ def get_hbm_component_info(user_input):
 # ==========================================
 
 def initialize_crawled_data():
-    """챗봇 초기화 시 자동으로 크롤링 실행"""
+    """챗봇 초기화 시 자동으로 크롤링 실행 (모든 대시보드 데이터 수집)"""
     global crawled_data_cache, cache_timestamp
     
     try:
@@ -586,15 +651,17 @@ def initialize_crawled_data():
         print("=" * 60)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        crawled_data_cache = loop.run_until_complete(crawler.crawl_wafermodeling_data())
+        # 모든 대시보드 데이터 크롤링 (wafermodeling, stacking, inventory, logs)
+        crawled_data_cache = loop.run_until_complete(crawler.crawl_all_dashboard_data())
         cache_timestamp = time.time()
         loop.close()
         
         if crawled_data_cache:
-            total = crawled_data_cache.get('summary', {}).get('total_wafers', 0)
-            method = crawled_data_cache.get('crawl_method', 'UNKNOWN')
-            print(f"\n✅ [초기화 완료] {total}개 웨이퍼 수집 완료")
-            print(f"   → 사용된 방식: {method}")
+            summary = crawled_data_cache.get('summary', {})
+            successful = summary.get('successful', 0)
+            total_sources = summary.get('total_sources', 0)
+            print(f"\n✅ [초기화 완료] {successful}/{total_sources}개 데이터 소스 수집 완료")
+            print(f"   → 수집된 데이터: wafermodeling, stacking, inventory, logs")
             print("=" * 60 + "\n")
         else:
             print("\n⚠️ [초기화 실패] 크롤링 결과 없음")
@@ -607,7 +674,7 @@ def initialize_crawled_data():
         crawled_data_cache = None
 
 def get_crawled_data(force_refresh=False):
-    """캐시된 크롤링 데이터 가져오기 (필요시 갱신)"""
+    """캐시된 크롤링 데이터 가져오기 (필요시 갱신) - 모든 대시보드 데이터"""
     global crawled_data_cache, cache_timestamp
     
     with _cache_lock:
@@ -625,15 +692,17 @@ def get_crawled_data(force_refresh=False):
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                crawled_data_cache = loop.run_until_complete(crawler.crawl_wafermodeling_data())
+                # 모든 대시보드 데이터 크롤링 (wafermodeling, stacking, inventory, logs)
+                crawled_data_cache = loop.run_until_complete(crawler.crawl_all_dashboard_data())
                 cache_timestamp = time.time()
                 loop.close()
                 
                 if crawled_data_cache:
-                    total = crawled_data_cache.get('summary', {}).get('total_wafers', 0)
-                    method = crawled_data_cache.get('crawl_method', 'UNKNOWN')
-                    print(f"✅ [수집 완료] {total}개 웨이퍼 수집 완료")
-                    print(f"   → 사용된 방식: {method}\n")
+                    summary = crawled_data_cache.get('summary', {})
+                    successful = summary.get('successful', 0)
+                    total_sources = summary.get('total_sources', 0)
+                    print(f"✅ [수집 완료] {successful}/{total_sources}개 데이터 소스 수집 완료")
+                    print(f"   → 수집된 데이터: wafermodeling, stacking, inventory, logs\n")
                 else:
                     print("⚠️ [수집 실패] 크롤링 데이터 수집 결과 없음\n")
             except Exception as e:
@@ -738,10 +807,18 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 """
             else:
                 print(f"⚠️ 웨이퍼를 찾을 수 없음: {wafer_ids}")
-                # 웨이퍼 목록 제공
+                # 웨이퍼 목록 제공 (새로운 캐시 구조 지원)
                 try:
                     wafer_list = []
-                    if isinstance(crawled_data, dict) and "data" in crawled_data:
+                    # 경로 1: 새로운 캐시 구조 (crawl_all_dashboard_data() 결과)
+                    if isinstance(crawled_data, dict) and "wafermodeling" in crawled_data:
+                        wafermodeling_data = crawled_data.get("wafermodeling", {})
+                        if isinstance(wafermodeling_data, dict) and "data" in wafermodeling_data:
+                            data = wafermodeling_data.get("data", {})
+                            if isinstance(data, dict) and "wafers" in data:
+                                wafer_list = data.get("wafers", [])
+                    # 경로 2: 기존 경로 (하위 호환성)
+                    elif isinstance(crawled_data, dict) and "data" in crawled_data:
                         data = crawled_data.get("data", {})
                         if isinstance(data, dict) and "wafers" in data:
                             wafer_list = data.get("wafers", [])
@@ -777,7 +854,102 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
         # 사용자 입력에서 적층 ID 추출
         stack_ids = extract_stack_id_from_input(user_input)
         
-        if stack_ids:
+        # "정상 칩", "good die" 등 키워드 감지
+        user_input_lower = user_input.lower()
+        is_good_die_only = any(keyword in user_input_lower for keyword in [
+            "정상 칩", "정상칩", "good die", "gooddie", "정상으로만", "정상만", 
+            "불량 없는", "불량없는", "defect free", "normal only", "정상 칩으로만",
+            "정상 레이어", "정상레이어", "정상 레이어로만", "정상레이어로만"
+        ])
+        
+        # 모든 스택 가져오기 (새로운 캐시 구조 지원)
+        stack_list = []
+        if isinstance(crawled_data, dict):
+            # 경로 1: 새로운 캐시 구조 (crawl_all_dashboard_data() 결과)
+            if "stacking" in crawled_data:
+                stacking_data = crawled_data.get("stacking", {})
+                if isinstance(stacking_data, dict):
+                    data = stacking_data.get("data", {})
+                    if isinstance(data, dict):
+                        latest_result = data.get("latest_result", {})
+                        if isinstance(latest_result, dict) and "stacks" in latest_result:
+                            stack_list = latest_result.get("stacks", [])
+                        elif "stacks" in data:
+                            stack_list = data.get("stacks", [])
+            
+            # 경로 2: 기존 경로 (하위 호환성)
+            if not stack_list and "data" in crawled_data:
+                data = crawled_data.get("data", {})
+                if isinstance(data, dict) and "stacks" in data:
+                    stack_list = data.get("stacks", [])
+            
+            # 경로 3: stack_data 키를 통한 접근 (하위 호환성)
+            if not stack_list and "stack_data" in crawled_data:
+                stack_data = crawled_data.get("stack_data", {})
+                if isinstance(stack_data, dict) and "data" in stack_data:
+                    data = stack_data.get("data", {})
+                    if isinstance(data, dict):
+                        latest_result = data.get("latest_result", {})
+                        if isinstance(latest_result, dict) and "stacks" in latest_result:
+                            stack_list = latest_result.get("stacks", [])
+                        elif "stacks" in data:
+                            stack_list = data.get("stacks", [])
+        
+        # 정상 레이어로만 구성된 스택 필터링
+        if is_good_die_only and stack_list:
+            print(f"🔍 정상 레이어로만 구성된 스택 필터링 시작... (총 {len(stack_list)}개 스택 중)")
+            filtered_stacks = []
+            for stack in stack_list:
+                layers = stack.get("layers", [])
+                if layers:
+                    # 모든 레이어가 die_status == 1인지 확인
+                    all_good = all(
+                        layer.get("die_status") == 1 
+                        for layer in layers 
+                        if layer.get("die_status") is not None
+                    )
+                    if all_good:
+                        filtered_stacks.append(stack)
+            
+            if filtered_stacks:
+                print(f"✅ 정상 레이어로만 구성된 스택 {len(filtered_stacks)}개 발견")
+                import json
+                stack_search_context = f"""
+**중요: 정상 레이어로만 구성된 스택 정보**
+
+총 {len(filtered_stacks)}개의 정상 레이어로만 적층된 스택을 찾았습니다.
+
+**스택 목록:**
+"""
+                for i, stack in enumerate(filtered_stacks[:10], 1):  # 최대 10개만 표시
+                    layers = stack.get("layers", [])
+                    stack_search_context += f"""
+{i}. **스택 ID: {stack.get('stack_id', 'N/A')}**
+   - 스택 품질 등급: {stack.get('final_grade', stack.get('score', 'N/A'))}
+   - 적층 케이스 수율: {stack.get('final_yield', 0):.2f}%
+   - 레이어 수: 8개 (HBM 표준: 항상 8개)
+   - 모든 레이어가 정상 레이어(die_status=1)로 구성됨
+"""
+                
+                if len(filtered_stacks) > 10:
+                    stack_search_context += f"\n... 외 {len(filtered_stacks) - 10}개 스택 더 있음\n"
+                
+                # 첫 번째 스택의 상세 정보도 포함
+                if filtered_stacks:
+                    first_stack = filtered_stacks[0]
+                    stack_search_context += f"""
+**첫 번째 스택 상세 정보:**
+{json.dumps(first_stack, ensure_ascii=False, indent=2)}
+"""
+            else:
+                print(f"⚠️ 정상 레이어로만 구성된 스택을 찾을 수 없음")
+                stack_search_context = """
+**참고:** 정상 레이어로만 구성된 스택을 찾을 수 없습니다.
+현재 모든 스택에 최소 하나 이상의 불량 레이어 또는 주의 레이어가 포함되어 있습니다.
+"""
+        
+        # 기존 로직: 특정 스택 ID로 검색
+        elif stack_ids:
             print(f"🔍 추출된 적층 ID: {stack_ids}")
             # 데이터에서 적층 찾기
             found_stack = find_stack_in_data(stack_ids, crawled_data)
@@ -786,41 +958,101 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
                 print(f"✅ 적층 찾음: {found_stack.get('stack_id')}")
                 import json
                 # 찾은 적층 데이터를 명시적으로 포함
+                layers = found_stack.get('layers', [])
+                actual_layer_count = len(layers)
+                expected_layer_count = 8  # HBM 스택은 항상 8개 레이어
+                
+                print(f"🔍 [DEBUG] 스택 {found_stack.get('stack_id')}의 레이어 개수: 실제 {actual_layer_count}개 (예상: {expected_layer_count}개)")
+                print(f"🔍 [DEBUG] 레이어 상세 정보:")
+                for idx, layer in enumerate(layers):
+                    chip_id = layer.get('chip_id', 'N/A')
+                    chip_id_preview = chip_id[:50] + "..." if len(chip_id) > 50 else chip_id
+                    print(f"  - 레이어 {idx+1}: layer_idx={layer.get('layer_idx')}, chip_id={chip_id_preview}")
+                
+                if actual_layer_count != expected_layer_count:
+                    print(f"⚠️ [WARNING] 레이어 개수 불일치! 데이터에는 {actual_layer_count}개만 있지만, HBM 스택은 항상 {expected_layer_count}개입니다.")
+                
+                chip_ids_list = []
+                
+                # 레이어 정보를 명시적으로 나열 (JSON 전체보다 더 명확)
+                layers_info_text = ""
+                status_counts = {"정상": 0, "주의": 0, "불량": 0}
+                
+                for i, layer in enumerate(layers):
+                    chip_id = layer.get('chip_id', 'N/A')
+                    die_status = layer.get('die_status', 1)
+                    status_text = "정상" if die_status == 1 else ("불량" if layer.get('failure_type') in ['Random', 'Near-full'] else "주의")
+                    failure_type = layer.get('failure_type', 'None')
+                    layer_idx = layer.get('layer_idx', i+1)
+                    
+                    # 상태별 개수 카운트
+                    if status_text in status_counts:
+                        status_counts[status_text] += 1
+                    
+                    # 답변에서 과도한 줄바꿈을 방지하기 위해, 레이어당 1줄로 요약 포맷을 제공
+                    layers_info_text += (
+                        f"\n■ Layer {layer_idx} | "
+                        f"Chip ID: {chip_id} | "
+                        f"상태: {status_text} | "
+                        f"불량유형: {failure_type}"
+                    )
+                    
+                    if chip_id and chip_id != 'N/A':
+                        chip_ids_list.append(chip_id)
+                
                 stack_search_context = f"""
 **중요: 사용자가 요청한 특정 적층 정보**
-다음 적층 데이터를 반드시 사용하여 답변하세요:
+스택 ID: {found_stack.get('stack_id', 'N/A')}
+스택 품질 등급: {found_stack.get('final_grade', found_stack.get('score', 'N/A'))}
+적층 케이스 수율: {found_stack.get('final_yield', 0):.2f}%
+레이어 상태 분포: 정상 {status_counts['정상']}개, 주의 {status_counts['주의']}개, 불량 {status_counts['불량']}개
 
-{json.dumps(found_stack, ensure_ascii=False, indent=2)}
+**⚠️ 매우 중요: 분석 요약 형식 규칙**
+- "분석 요약" 또는 "적층 분석 결과 요약" 섹션에는 반드시 다음 정보를 포함하세요:
+  1. 스택 품질 등급
+  2. 적층 케이스 수율
+  3. 레이어 상태 분포 (정상 X개, 주의 X개, 불량 X개) - 위에 제공된 "레이어 상태 분포" 정보를 그대로 사용하세요
 
-위 적층의 다음 정보를 상세히 제공하세요:
-- 적층 ID: {found_stack.get('stack_id', 'N/A')}
-- 점수/등급: {found_stack.get('score', 'N/A')}
-- 층 수: {len(found_stack.get('layers', []))}층
-- 각 층 정보:
+**⚠️ 매우 중요: HBM 스택 레이어 개수 규칙**
+HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표준입니다.
+위 데이터에는 {actual_layer_count}개의 레이어 정보가 있지만, 실제 HBM 스택은 항상 8개 레이어입니다.
+
+**레이어 개수 답변 규칙:**
+- 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 "총 8개 레이어로 구성되어 있습니다" 같은 문구는 불필요합니다.
+- 데이터에 {actual_layer_count}개만 있다고 해서 {actual_layer_count}개라고 답변하지 마세요.
+
+**각 레이어의 상세 정보 (반드시 모든 레이어를 나열하세요 - 총 {actual_layer_count}개):**
+{layers_info_text}
+
+**사용된 Chip ID 목록 (총 {len(chip_ids_list)}개):**
+{', '.join(chip_ids_list)}
+
+**매우 중요 - 레이어 개수 표시 규칙:**
+- HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표준입니다.
+- 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 불필요합니다.
+- 데이터에 {actual_layer_count}개만 있다고 해서 {actual_layer_count}개라고 답변하지 마세요.
+- 위에 나열된 {actual_layer_count}개의 레이어 정보를 모두 완전히 나열하세요.
+- 레이어 표기는 영어로 "Layer 1", "Layer 2", "Layer 3" 형식으로 표시하세요. "DRAM 1" 또는 "레이어 1" 같은 표현은 사용하지 마세요.
+- 사용자가 "정보 알려줘"라고 요청하면, 핵심 정보만 간결하게 제공하세요. 불필요한 정보(TSV 상세 분석, 공정 개선 제안 등)는 포함하지 마세요.
+- 레이어 정보는 각 레이어마다 한 줄로 표시하세요. 레이어 간에는 줄바꿈 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요.
+- 섹션 헤더(■)와 내용 사이에는 빈 줄 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요.
+- 사용자가 "칩 전부", "모든 칩", "전체 칩", "사용된 칩", "Chip ID를 알려달라", "사용된 chip id", "칩 ID" 등을 요청한 경우, 위에 나열된 모든 레이어({actual_layer_count}개)의 Chip ID와 상세 정보를 모두 나열하세요.
+- **⚠️ 절대적으로 중요: 답변은 반드시 완전하게 작성하세요. 중간에 끊기지 않도록 하세요. 위에 "각 레이어의 상세 정보" 섹션에 나열된 {actual_layer_count}개의 레이어를 모두 완전히 나열한 후에 답변을 마무리하세요.**
+- **⚠️ 답변이 중간에 끊기면 안 됩니다. 위에 나열된 모든 레이어를 하나도 빠짐없이 나열하세요.**
+- **⚠️ 마지막 레이어까지 반드시 완전히 표시하세요. Chip ID가 길어도 중간에 끊지 마세요.**
+- **⚠️ 위에 "각 레이어의 상세 정보" 섹션에 나열된 모든 레이어를 반드시 답변에 포함하세요.**
 """
-                layers = found_stack.get('layers', [])
-                for i, layer in enumerate(layers):
-                    stack_search_context += f"  - 층 {i+1}: 칩 ID {layer.get('chip_id', 'N/A')}, 불량 패턴 {layer.get('failure_type', 'N/A')}, 유형 {layer.get('inferred_type', 'N/A')}\n"
             else:
                 print(f"⚠️ 적층을 찾을 수 없음: {stack_ids}")
                 # 적층 목록 제공
-                try:
-                    stack_list = []
-                    if isinstance(crawled_data, dict) and "data" in crawled_data:
-                        data = crawled_data.get("data", {})
-                        if isinstance(data, dict) and "stacks" in data:
-                            stack_list = data.get("stacks", [])
-                    
-                    if stack_list:
-                        available_ids = [s.get("stack_id", "") for s in stack_list[:10]]
-                        stack_search_context = f"""
+                if stack_list:
+                    available_ids = [s.get("stack_id", "") for s in stack_list[:10]]
+                    stack_search_context = f"""
 **참고:** 요청하신 적층({', '.join(stack_ids)})을 찾을 수 없습니다.
 
 사용 가능한 적층 목록 (총 {len(stack_list)}개):
 {', '.join([s for s in available_ids if s])}
 """
-                except:
-                    pass
     
     # 크롤링된 데이터 추가
     data_context = ""
@@ -831,9 +1063,19 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
             
             # classification 의도일 때 웨이퍼 데이터 특별 처리
             if intent == "classification":
-                # crawled_data 구조: {"data": {"wafers": [...], "statistics": {...}, "summary": {...}}, ...}
-                if isinstance(crawled_data, dict) and "data" in crawled_data:
-                    wafer_response = crawled_data.get("data", {})
+                # 새로운 캐시 구조 지원: crawled_data["wafermodeling"]["data"] 또는 crawled_data["data"]
+                wafer_response = None
+                if isinstance(crawled_data, dict):
+                    # 경로 1: 새로운 캐시 구조 (crawl_all_dashboard_data() 결과)
+                    if "wafermodeling" in crawled_data:
+                        wafermodeling_data = crawled_data.get("wafermodeling", {})
+                        if isinstance(wafermodeling_data, dict) and "data" in wafermodeling_data:
+                            wafer_response = wafermodeling_data.get("data", {})
+                    # 경로 2: 기존 경로 (하위 호환성)
+                    elif "data" in crawled_data:
+                        wafer_response = crawled_data.get("data", {})
+                
+                if wafer_response:
                     
                     if isinstance(wafer_response, dict):
                         # 통계 정보 명시적으로 추출
@@ -945,30 +1187,110 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
                         print(f"⚠️ [WARNING] wafer_response가 dict가 아닙니다: {type(wafer_response)}")
                         data_summary = f"\n**데이터 구조 오류:** wafer_response가 예상한 형식이 아닙니다."
                 else:
-                    print(f"⚠️ [WARNING] crawled_data에 'data' 키가 없습니다. crawled_data 구조: {list(crawled_data.keys()) if isinstance(crawled_data, dict) else type(crawled_data)}")
+                    # wafer_response가 None인 경우 (데이터를 찾을 수 없음)
+                    print(f"⚠️ [WARNING] 웨이퍼 데이터를 찾을 수 없습니다. crawled_data 구조: {list(crawled_data.keys()) if isinstance(crawled_data, dict) else type(crawled_data)}")
                     # crawled_data 전체를 출력하여 디버깅
                     import json
                     print(f"🔍 [DEBUG] crawled_data 전체: {json.dumps(crawled_data, ensure_ascii=False, indent=2)[:1000]}")
-                    data_summary = "\n**데이터 구조 오류:** 예상한 데이터 구조가 아닙니다."
-            else:
-                # 다른 의도들에 대한 기존 처리
+                    data_summary = "\n**참고:** 현재 데이터베이스에 웨이퍼 데이터가 없거나, 크롤러가 데이터를 가져오지 못했습니다."
+            
+            # inventory 의도일 때 재고 데이터 특별 처리
+            elif intent == "inventory":
+                inventory_response = None
                 if isinstance(crawled_data, dict):
-                    cleaned_data = {k: v for k, v in crawled_data.items() 
-                                   if k not in ['timestamp', 'crawled_at', 'source']}
+                    # 경로 1: 새로운 캐시 구조 (crawl_all_dashboard_data() 결과)
+                    if "inventory" in crawled_data:
+                        inventory_source = crawled_data.get("inventory", {})
+                        if isinstance(inventory_source, dict) and "data" in inventory_source:
+                            inventory_response = inventory_source.get("data", {})
+                    # 경로 2: 기존 경로 (하위 호환성)
+                    elif "inventory_data" in crawled_data:
+                        inventory_response = crawled_data.get("inventory_data", {})
+                
+                if inventory_response and isinstance(inventory_response, dict):
+                    summary = inventory_response.get("summary", {})
+                    items = inventory_response.get("items", [])
+                    chips = inventory_response.get("chips", [])
                     
-                    if "summary" in cleaned_data:
-                        summary = cleaned_data.get("summary", {})
-                        cleaned_summary = {k: v for k, v in summary.items() 
-                                         if k not in ['timestamp', 'crawled_at']}
-                        data_summary = f"\n데이터 요약: {json.dumps(cleaned_summary, ensure_ascii=False, indent=2)}"
-                    elif "data" in cleaned_data:
-                        data = cleaned_data.get("data", {})
-                        if isinstance(data, dict):
-                            data_summary = f"\n데이터: {json.dumps(data, ensure_ascii=False, indent=2)[:2000]}"
-                        elif isinstance(data, list) and len(data) > 0:
-                            data_summary = f"\n데이터 항목 수: {len(data)}개\n샘플 데이터: {json.dumps(data[0] if len(data) > 0 else {}, ensure_ascii=False, indent=2)[:1000]}"
+                    total_chips = summary.get("total_chips", len(chips) if chips else 0)
+                    good_chips = summary.get("good_chips", 0)
+                    bad_chips = summary.get("bad_chips", 0)
+                    
+                    data_summary = f"""
+**실제 데이터베이스에서 조회한 재고 데이터:**
+
+**재고 통계 정보 (반드시 이 값을 사용하세요 - 실제 DB 값입니다):**
+- 총 칩 재고: {total_chips:,}개
+- 정상 칩 (Good Die): {good_chips:,}개
+- 불량 칩 (Bad Die): {bad_chips:,}개
+- 재고 부족 항목: {summary.get('low_stock_count', 0)}개
+
+**재고 항목 목록:** 총 {len(items)}개 항목
+"""
+                    if items and len(items) > 0:
+                        sample_items = items[:10]  # 처음 10개만 표시
+                        data_summary += f"\n**재고 항목 샘플 (처음 10개):**\n"
+                        for i, item in enumerate(sample_items):
+                            chip_uid = item.get("chip_uid", "N/A")
+                            status = item.get("status", "N/A")
+                            failure_type = item.get("failure_type", "None")
+                            die_status = "정상" if item.get("die_status") == 1 else "불량"
+                            data_summary += f"{i+1}. {chip_uid} - 상태: {die_status}, 불량유형: {failure_type}\n"
+                        
+                        if len(items) > 10:
+                            data_summary += f"\n... 외 {len(items) - 10}개 항목 더 있음\n"
+                else:
+                    data_summary = "\n**참고:** 현재 데이터베이스에 재고 데이터가 없거나, 크롤러가 데이터를 가져오지 못했습니다."
+            
+            else:
+                # 다른 의도들에 대한 기존 처리 (새로운 캐시 구조 지원)
+                if isinstance(crawled_data, dict):
+                    # 새로운 캐시 구조: 각 소스별로 데이터 추출
+                    cleaned_data = {}
+                    
+                    # 각 소스별 데이터 추출 (wafermodeling, stacking, inventory, logs)
+                    for source_key in ["wafermodeling", "stacking", "inventory", "logs"]:
+                        if source_key in crawled_data:
+                            source_data = crawled_data.get(source_key, {})
+                            if isinstance(source_data, dict):
+                                # source_data에서 실제 데이터 추출
+                                source_cleaned = {k: v for k, v in source_data.items() 
+                                                 if k not in ['timestamp', 'crawled_at', 'source', 'crawl_method', 'crawl_method_description']}
+                                if source_cleaned:
+                                    cleaned_data[source_key] = source_cleaned
+                    
+                    # 기존 구조도 지원 (하위 호환성)
+                    if not cleaned_data:
+                        cleaned_data = {k: v for k, v in crawled_data.items() 
+                                       if k not in ['timestamp', 'crawled_at', 'source']}
+                    
+                    if cleaned_data:
+                        # summary가 있으면 우선 표시
+                        if "summary" in cleaned_data:
+                            summary = cleaned_data.get("summary", {})
+                            cleaned_summary = {k: v for k, v in summary.items() 
+                                             if k not in ['timestamp', 'crawled_at']}
+                            data_summary = f"\n데이터 요약: {json.dumps(cleaned_summary, ensure_ascii=False, indent=2)}"
+                        else:
+                            # 각 소스별로 데이터 요약
+                            summary_parts = []
+                            for source_key, source_data in cleaned_data.items():
+                                if isinstance(source_data, dict):
+                                    if "summary" in source_data:
+                                        summary_parts.append(f"{source_key}: {json.dumps(source_data.get('summary', {}), ensure_ascii=False, indent=2)}")
+                                    elif "data" in source_data:
+                                        data = source_data.get("data", {})
+                                        if isinstance(data, dict):
+                                            summary_parts.append(f"{source_key}: {json.dumps(data, ensure_ascii=False, indent=2)[:1000]}")
+                                        elif isinstance(data, list) and len(data) > 0:
+                                            summary_parts.append(f"{source_key}: {len(data)}개 항목")
+                            
+                            if summary_parts:
+                                data_summary = "\n" + "\n".join(summary_parts)
+                            else:
+                                data_summary = f"\n데이터: {json.dumps(cleaned_data, ensure_ascii=False, indent=2)[:2000]}"
                     else:
-                        data_summary = f"\n데이터: {json.dumps(cleaned_data, ensure_ascii=False, indent=2)[:2000]}"
+                        data_summary = "\n**참고:** 크롤링된 데이터가 없습니다."
             
             if data_summary:
                 data_context = f"\n\n**실제 시스템 데이터 (데이터베이스에서 조회한 실제 값입니다):**{data_summary}\n\n**중요:** 위에 제공된 통계 정보(총 웨이퍼 수, Good Die, Bad Die 등)는 실제 데이터베이스에서 조회한 정확한 값입니다. 반드시 이 값을 사용하여 답변하세요. 임의의 값을 생성하거나 추측하지 마세요. 타임스탬프나 수집 시간 정보는 답변에 포함하지 마세요."
@@ -986,9 +1308,15 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 3. 답변은 적절한 수준의 상세함으로 작성하세요 (너무 간결하지도, 너무 길지도 않게)
 4. 구체적인 수치와 데이터가 있으면 포함하세요
 5. 데이터가 없는 경우에는 해당 내용을 언급하지 말고, 있는 데이터만으로 답변하세요
+6. **⚠️ 절대적으로 중요: 답변은 반드시 완전하게 작성하세요. 중간에 끊기지 않도록 하세요. 모든 정보를 완전히 나열한 후에 답변을 마무리하세요.**
 
 답변 가독성 규칙 (매우 중요):
-- 각 문단 사이에는 빈 줄을 넣어 구분하세요
+- HBM 스택은 항상 8개 레이어로 구성됩니다. 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 불필요합니다.
+- 레이어 표기는 영어로 "Layer 1", "Layer 2", "Layer 3" 형식으로 표시하세요. "DRAM 1" 또는 "레이어 1" 같은 표현은 사용하지 마세요.
+- 레이어 정보는 각 레이어마다 한 줄로 표시하세요. 레이어 간에는 줄바꿈 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요.
+- 사용자가 "정보 알려줘"라고 요청하면, 핵심 정보만 간결하게 제공하세요. 불필요한 정보(TSV 상세 분석, 공정 개선 제안 등)는 포함하지 마세요.
+- **⚠️ 절대적으로 중요: 모든 레이어의 정보를 완전히 나열한 후에 답변을 마무리하세요. 답변이 중간에 끊기면 안 됩니다. Chip ID가 길어도 중간에 끊지 마세요.**
+- 섹션 헤더(■)와 내용 사이에는 빈 줄 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요.
 - 숫자는 천 단위 구분 표시를 사용하세요 (예: 63,911개, 23,249개)
 - 통계나 수치는 한 줄에 하나씩 표시하세요
 - 리스트나 항목은 줄바꿈으로 명확히 구분하세요
@@ -1042,6 +1370,17 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 8. 절대로 임의의 값을 생성하지 마세요. 위에 제공된 실제 데이터만 사용하세요
 9. "총 분석 웨이퍼 수" 값이 0개로 표시되어 있으면, "현재 데이터베이스에 웨이퍼 데이터가 없습니다"라고 답변하세요
 10. 가독성을 위해 마크다운 문법(**볼드**, *이탤릭* 등)과 특수 기호(•, →, ✓, ■ 등)를 적절히 활용하세요
+11. HBM 스택은 항상 8개 레이어로 구성됩니다. 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 "총 8개 레이어로 구성되어 있습니다" 같은 문구는 불필요합니다
+12. 레이어 표기는 영어로 "Layer 1", "Layer 2", "Layer 3" 형식으로 표시하세요. "DRAM 1" 또는 "레이어 1" 같은 표현은 사용하지 마세요
+13. 사용자가 "정보 알려줘"라고 요청하면, 핵심 정보만 간결하게 제공하세요. 불필요한 정보(TSV 상세 분석, 공정 개선 제안 등)는 포함하지 마세요
+14. 레이어 정보는 각 레이어마다 한 줄로 표시하세요. 레이어 간에는 줄바꿈 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요
+15. **⚠️ 절대적으로 중요: 답변은 반드시 완전하게 작성하세요. 중간에 끊기지 않도록 하세요. 모든 레이어의 정보를 완전히 나열한 후에 답변을 마무리하세요.**
+16. **⚠️ 답변이 중간에 끊기면 안 됩니다. 모든 레이어를 하나도 빠짐없이 나열하세요.**
+17. **⚠️ 마지막 레이어까지 반드시 완전히 표시하세요. Chip ID가 길어도 중간에 끊지 마세요.**
+18. **적층 분석 결과를 제공할 때, "분석 요약" 또는 "적층 분석 결과 요약" 섹션에는 반드시 다음 정보를 포함하세요:**
+    - 스택 품질 등급
+    - 적층 케이스 수율
+    - 레이어 상태 분포 (정상 X개, 주의 X개, 불량 X개) - 위에 제공된 "레이어 상태 분포" 정보가 있으면 반드시 포함하세요
 """
     
     return enhanced_prompt, temperature
@@ -1118,12 +1457,19 @@ def chat():
                 
                 loop.close()
                 
-                # 추가 데이터가 있으면 crawled_data에 병합
+                # 추가 데이터가 있으면 crawled_data에 병합 (새로운 캐시 구조에 맞게)
                 if additional_data:
                     if crawled_data is None:
                         crawled_data = {}
-                    crawled_data[f"{intent}_data"] = additional_data
-                    print(f"✅ [{intent}] 추가 데이터 크롤링 완료")
+                    # 새로운 캐시 구조에 맞게 저장
+                    # intent가 "yield"인 경우 "logs"로, "stack"인 경우 "stacking"으로 매핑
+                    cache_key = {
+                        "yield": "logs",
+                        "inventory": "inventory",
+                        "stack": "stacking"
+                    }.get(intent, intent)
+                    crawled_data[cache_key] = additional_data
+                    print(f"✅ [{intent}] 추가 데이터 크롤링 완료 (캐시 키: {cache_key})")
             except Exception as crawl_error:
                 print(f"⚠️ [{intent}] 추가 데이터 크롤링 오류: {crawl_error}")
                 # 오류가 있어도 기본 웨이퍼 데이터는 사용 가능

@@ -196,18 +196,75 @@ class HBMDataCrawler:
         try:
             print("📦 Inventory 데이터 크롤링 시작...")
             
-            # 재고 관련 API 엔드포인트 호출
-            # 실제 API가 없으면 데모 데이터 구조 반환
-            inventory_data = await self.fetch_api_data("/api/inventory")
+            # 실제 재고 API 엔드포인트 호출 (/inventory/chips)
+            chips_data = await self.fetch_api_data("/inventory/chips?limit=10000")
             
-            if inventory_data is None:
-                # 데모 데이터 구조 반환
-                print("⚠️ API 데이터 없음, 데모 데이터 구조 반환")
+            if chips_data is None:
+                print("⚠️ API 데이터 없음, 빈 데이터 반환")
                 inventory_data = {
                     "items": [],
+                    "chips": [],
                     "summary": {
                         "total_items": 0,
+                        "total_chips": 0,
                         "low_stock_count": 0,
+                        "critical_stock_count": 0
+                    }
+                }
+            else:
+                # chips 데이터를 inventory 형식으로 변환
+                chips = []
+                if isinstance(chips_data, dict):
+                    chips = chips_data.get("chips", [])
+                    total = chips_data.get("total", len(chips))
+                elif isinstance(chips_data, list):
+                    chips = chips_data
+                    total = len(chips)
+                else:
+                    chips = []
+                    total = 0
+                
+                print(f"🔍 [DEBUG] 칩 데이터 수신: {len(chips)}개 칩 (전체: {total}개)")
+                
+                # 칩 데이터를 재고 항목 형식으로 변환
+                items = []
+                for chip in chips:
+                    chip_uid = chip.get("chip_uid", "")
+                    die_status = chip.get("die_status", 0)
+                    failure_type = chip.get("failure_type", "None")
+                    
+                    # 재고 상태 판단 (die_status: 1=정상, 0=불량)
+                    status = "optimal" if die_status == 1 else "low"
+                    
+                    items.append({
+                        "id": chip_uid,
+                        "name": f"Chip {chip_uid[:20]}..." if len(chip_uid) > 20 else f"Chip {chip_uid}",
+                        "category": "chip",
+                        "chip_uid": chip_uid,
+                        "wafer_idx": chip.get("wafer_idx"),
+                        "failure_type": failure_type,
+                        "die_status": die_status,
+                        "coor_x": chip.get("coor_x"),
+                        "coor_y": chip.get("coor_y"),
+                        "status": status,
+                        "currentStock": 1,  # 각 칩은 1개 단위
+                        "minStock": 0,
+                        "maxStock": 1
+                    })
+                
+                # 통계 계산
+                good_chips = [c for c in chips if c.get("die_status") == 1]
+                bad_chips = [c for c in chips if c.get("die_status") != 1]
+                
+                inventory_data = {
+                    "items": items,
+                    "chips": chips,  # 원본 데이터도 포함
+                    "summary": {
+                        "total_items": total,
+                        "total_chips": total,
+                        "good_chips": len(good_chips),
+                        "bad_chips": len(bad_chips),
+                        "low_stock_count": len(bad_chips),
                         "critical_stock_count": 0
                     }
                 }
@@ -218,7 +275,7 @@ class HBMDataCrawler:
                 "source": "inventory",
                 "data": inventory_data,
                 "summary": {
-                    "total_items": len(inventory_data.get("items", [])) if isinstance(inventory_data, dict) else len(inventory_data) if isinstance(inventory_data, list) else 0,
+                    "total_items": inventory_data.get("summary", {}).get("total_chips", 0),
                     "crawled_at": datetime.now().isoformat()
                 }
             }
@@ -301,33 +358,56 @@ class HBMDataCrawler:
         try:
             print("🔬 Stacking 데이터 크롤링 시작...")
             
-            # 적층 관련 API 엔드포인트 호출
-            stacking_data = await self.fetch_api_data("/stack/analyze")
+            # 1. 히스토리 목록 가져오기
+            history = await self.fetch_api_data("/stack/list")
             
-            if stacking_data is None:
-                # 데모 데이터 구조 반환
-                print("⚠️ API 데이터 없음, 데모 데이터 구조 반환")
-                stacking_data = {
-                    "stacks": [],
+            if not history or len(history) == 0:
+                print("⚠️ 히스토리 데이터 없음")
+                return {
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "stacking",
+                    "data": {
+                        "history": [],
+                        "latest_result": None
+                    },
                     "summary": {
+                        "total_history": 0,
+                        "latest_tsv_num": None,
                         "total_stacks": 0,
-                        "good_stacks": 0,
-                        "defect_stacks": 0
+                        "crawled_at": datetime.now().isoformat()
                     }
                 }
+            
+            # 2. 최신 tsv_num 찾기
+            latest_tsv_num = history[0]['tsv_num']
+            print(f"📊 최신 tsv_num: {latest_tsv_num}")
+            
+            # 3. 최신 스택 결과 가져오기
+            stack_result = await self.fetch_api_data(f"/stack/result/{latest_tsv_num}")
+            
+            # 스택 개수 계산
+            total_stacks = 0
+            if stack_result and isinstance(stack_result, dict):
+                stacks = stack_result.get("stacks", [])
+                total_stacks = len(stacks) if isinstance(stacks, list) else 0
             
             # 데이터 정규화
             result = {
                 "timestamp": datetime.now().isoformat(),
                 "source": "stacking",
-                "data": stacking_data,
+                "data": {
+                    "history": history,
+                    "latest_result": stack_result
+                },
                 "summary": {
-                    "total_stacks": len(stacking_data.get("stacks", [])) if isinstance(stacking_data, dict) else len(stacking_data) if isinstance(stacking_data, list) else 0,
+                    "total_history": len(history),
+                    "latest_tsv_num": latest_tsv_num,
+                    "total_stacks": total_stacks,
                     "crawled_at": datetime.now().isoformat()
                 }
             }
             
-            print(f"✅ Stacking 데이터 크롤링 완료: {result['summary']['total_stacks']}개 항목")
+            print(f"✅ Stacking 데이터 크롤링 완료: {result['summary']['total_stacks']}개 스택")
             return result
             
         except Exception as e:
