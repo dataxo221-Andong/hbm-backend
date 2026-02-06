@@ -490,13 +490,9 @@ def run_stacking_simulation_logic(batch_id):
             
             final_grade = "N/A"
             
-            has_critical_defect = any(l['die_status'] == 2 and l['failure_type'] in ['Random', 'Near-full'] for l in frontend_layer_list)
-            
-            if final_yield >= 96.0 and not has_critical_defect:
+            if final_yield >= 96.0:
                 final_grade = "A"
-            elif final_yield >= 90.0:
-                final_grade = "B"
-            elif final_yield >= 80.0 and not has_critical_defect:
+            elif final_yield >= 92.0:
                 final_grade = "B"
             else:
                 final_grade = "C"
@@ -758,13 +754,14 @@ def get_result(tsv_num):
             # B: Yield >= 90%
             # C: Yield < 90% OR Critical Defect Exists
             
-            has_critical_defect = any(l['die_status'] == 2 and l['failure_type'] in ['Random', 'Near-full'] for l in layers)
+            # [수정] Grading Logic Simplified (Yield Only)
+            # A: >= 96.0
+            # B: >= 92.0
+            # C: < 92.0
             
-            if final_yield >= 96.0 and not has_critical_defect:
+            if final_yield >= 96.0:
                 final_grade = "A"
-            elif final_yield >= 90.0:
-                final_grade = "B"
-            elif final_yield >= 85.0 and not has_critical_defect:
+            elif final_yield >= 92.0:
                 final_grade = "B"
             else:
                 final_grade = "C"

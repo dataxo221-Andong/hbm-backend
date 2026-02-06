@@ -127,16 +127,16 @@ def restore_log(target_tsv_num):
                     # Fallback (개별 칩 수율 평균)
                     pass
 
-            # (2) Grading
-            has_critical = any(l['die_status'] == 2 and l['failure_type'] in ['Random', 'Near-full'] for l in layers)
-            
-            grade = "C"
-            if final_yield >= 96.0 and not has_critical:
+            # (2) Grading (Updated: Yield Only)
+            # A: >= 96.0
+            # B: >= 92.0
+            # C: < 92.0
+            if final_yield >= 96.0:
                 grade = "A"
-            elif final_yield >= 90.0:
+            elif final_yield >= 92.0:
                 grade = "B"
-            elif final_yield >= 85.0 and not has_critical:
-                grade = "B"
+            else:
+                grade = "C"
             
             # (3) Count
             if grade == "A": grade_a_count += 1
