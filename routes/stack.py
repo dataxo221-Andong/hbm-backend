@@ -267,7 +267,7 @@ def run_stacking_simulation_logic(batch_id, progress_callback=None):
 
     remaining = list(range(N))
     groups = []
-    max_attempts = len(remaining) * 2
+    max_attempts = len(remaining) * 1
     attempt_count = 0
 
     print(f"[Grouping] 그룹화 시작")
