@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response, stream_with_context
 import sys
 import os
 import cv2
@@ -10,6 +10,8 @@ import json
 import pymysql
 import random
 import time
+import queue
+import threading
 from db import get_conn
 
 # Blueprint 정의
@@ -19,7 +21,7 @@ stack_bp = Blueprint("stack", __name__, url_prefix="/stack")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 
-def run_stacking_simulation_logic(batch_id):
+def run_stacking_simulation_logic(batch_id, progress_callback=None):
     # 1. 파일 찾기 logic (Server specific)
     if not batch_id:
         files = [f for f in os.listdir(MODELS_DIR) if f.startswith('BATCH_') and f.endswith('.pkl')]
@@ -180,13 +182,15 @@ def run_stacking_simulation_logic(batch_id):
     pair_start = time.perf_counter()
     print(f"[Group] cost matrix 계산 시작: pairs={pair_total}")
     sys.stdout.flush()
+    if progress_callback:
+        progress_callback(0.0)
 
     cost_mat = np.full((N, N), np.inf, dtype=np.float32)
     np.fill_diagonal(cost_mat, 0.0)
 
     processed_pairs = 0
     last_progress = 0
-    progress_interval = 0.05  # 5% 단위
+    progress_interval = 0.0001  # 0.01% 단위 (틱 단위)
 
     for i in range(N):
         for j in range(i + 1, N):
@@ -199,12 +203,17 @@ def run_stacking_simulation_logic(batch_id):
             current_progress = processed_pairs / pair_total
             if current_progress - last_progress >= progress_interval:
                 elapsed = time.perf_counter() - pair_start
-                print(f"[Group] cost matrix 진행: {current_progress*100:.1f}%")
+                print(f"[Group] cost matrix 진행: {current_progress*100:.2f}%")
                 sys.stdout.flush()
                 last_progress = current_progress
+                if progress_callback:
+                    overall = current_progress * 50.0  # cost matrix = 0~50%
+                    progress_callback(round(overall, 2))
 
     elapsed = time.perf_counter() - pair_start
     print(f"[Group] cost matrix 완료: {elapsed:.1f}s")
+    if progress_callback:
+        progress_callback(50.0)
 
     def _pick_next(group, remaining):
         # 후보군 수집 (score, j)
@@ -387,6 +396,11 @@ def run_stacking_simulation_logic(batch_id):
                 remaining.remove(member)
         
         groups.append(best_trial_group)
+        if progress_callback:
+            max_possible = max(1, N // group_size)
+            grouping_pct = min(1.0, len(groups) / max_possible)
+            overall = 50.0 + 50.0 * grouping_pct  # grouping = 50~100%
+            progress_callback(round(overall, 2))
 
     print(f"[Grouping] 완료: {len(groups)} groups")
 
@@ -557,6 +571,8 @@ def run_stacking_simulation_logic(batch_id):
         cur.close()
         conn.close()
 
+    if progress_callback:
+        progress_callback(100.0)
     return {
         "batch_id": batch_id,
         "stacks": stacks_result,
@@ -577,6 +593,62 @@ def analyze_stack():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
+@stack_bp.route("/analyze/stream", methods=["POST"])
+def analyze_stack_stream():
+    """SSE 스트리밍으로 진행률 실시간 전송 (cost matrix + grouping 전체)"""
+    try:
+        data = request.get_json() or {}
+        batch_id = data.get('batch_id')
+
+        progress_queue = queue.Queue()
+        result_holder = [None]
+
+        def progress_callback(percent):
+            progress_queue.put(percent)
+
+        def run_analysis():
+            try:
+                result_holder[0] = run_stacking_simulation_logic(batch_id, progress_callback=progress_callback)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                result_holder[0] = {"error": str(e)}
+
+        thread = threading.Thread(target=run_analysis)
+        thread.start()
+
+        def generate():
+            last_sent = -1
+            while thread.is_alive():
+                try:
+                    p = progress_queue.get(timeout=0.05)
+                    if p > last_sent:
+                        last_sent = p
+                        yield f"data: {{\"percent\": {p:.2f}}}\n\n"
+                except queue.Empty:
+                    pass
+            thread.join()
+            result = result_holder[0]
+            try:
+                result_str = json.dumps(result, default=str)
+            except (TypeError, ValueError):
+                result_str = json.dumps({"error": "Serialization failed", "stacks": []})
+            yield f"data: {{\"percent\": 100.0, \"result\": {result_str}}}\n\n"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive',
+            }
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @stack_bp.route("/list", methods=["GET"])
