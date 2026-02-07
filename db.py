@@ -6,7 +6,7 @@ def get_conn():
     """
     try:
         conn = pymysql.connect(
-            host="43.201.8.98",
+            host="52.79.35.75",
             user="mixup",
             password="6404",
             database="project",
