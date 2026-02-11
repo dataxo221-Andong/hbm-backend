@@ -369,7 +369,7 @@ def run_stacking_simulation_logic(batch_id, progress_callback=None):
                 simulated_yield = _calculate_stack_yield(temp_group)
                 
                 # 수율 85% 미만이면 가차없이 탈락 (적층 불가 판정)
-                if simulated_yield < 85.0:
+                if simulated_yield < 80.0:
                     continue
 
                 avg_score = temp_score_sum / (group_size - 1)
@@ -508,9 +508,9 @@ def run_stacking_simulation_logic(batch_id, progress_callback=None):
             
             final_grade = "N/A"
             
-            if final_yield >= 96.0:
+            if final_yield >= 80.0:
                 final_grade = "A"
-            elif final_yield >= 92.0:
+            elif final_yield >= 70.0:
                 final_grade = "B"
             else:
                 final_grade = "C"
