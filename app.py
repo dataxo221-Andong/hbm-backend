@@ -34,7 +34,7 @@ bcrypt = Bcrypt(app)
 # 프로덕션에서는 특정 origin만 허용하도록 수정 필요
 CORS(app, resources={
     r"/*": {
-        "origins": "*",  # 개발 환경: 모든 origin 허용
+        "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],  # 개발 환경: 모든 origin 허용
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": False  # "*" origin 사용 시 반드시 False (CORS 정책)

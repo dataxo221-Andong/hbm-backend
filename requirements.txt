@@ -22,3 +22,9 @@ webdriver-manager
 pandas
 joblib
 scikit-learn==1.6.1
+openpyxl
+
+# RAG (PDF + vector store)
+pypdf
+chromadb
+sentence-transformers

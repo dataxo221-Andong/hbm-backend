@@ -126,7 +126,7 @@ class HBMDataCrawler:
             url = f"{self.base_url}{endpoint}"
             print(f"🔍 API 호출 시도: {url}")
             
-            timeout = aiohttp.ClientTimeout(total=30)
+            timeout = aiohttp.ClientTimeout(total=60)
             connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
             
             async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
@@ -192,11 +192,11 @@ class HBMDataCrawler:
             return None
     
     async def crawl_inventory_data(self) -> Dict[str, Any]:
-        """재고 관리 데이터 크롤링 (inventory 페이지)"""
+        """재고 데이터 크롤링 - 웨이퍼처럼 실제 데이터 API 호출 (칩 목록 전체)"""
         try:
             print("📦 Inventory 데이터 크롤링 시작...")
             
-            # 실제 재고 API 엔드포인트 호출 (/inventory/chips)
+            # 데이터 조회용 API: 칩 목록 전체 (웨이퍼 /wafer/list 와 동일하게 실제 데이터)
             chips_data = await self.fetch_api_data("/inventory/chips?limit=10000")
             
             if chips_data is None:
@@ -207,8 +207,11 @@ class HBMDataCrawler:
                     "summary": {
                         "total_items": 0,
                         "total_chips": 0,
+                        "good_chips": 0,
+                        "bad_chips": 0,
                         "low_stock_count": 0,
-                        "critical_stock_count": 0
+                        "critical_stock_count": 0,
+                        "by_failure_type": {},
                     }
                 }
             else:
@@ -255,7 +258,13 @@ class HBMDataCrawler:
                 # 통계 계산
                 good_chips = [c for c in chips if c.get("die_status") == 1]
                 bad_chips = [c for c in chips if c.get("die_status") != 1]
-                
+                # 불량유형별 칩 수 (챗봇 재고 밸런스/병목·생산 제안용)
+                by_failure_type = {}
+                for c in bad_chips:
+                    ft = c.get("failure_type") or c.get("failureType") or "None"
+                    key = ft if isinstance(ft, str) and ft.strip() else "None"
+                    by_failure_type[key] = by_failure_type.get(key, 0) + 1
+
                 inventory_data = {
                     "items": items,
                     "chips": chips,  # 원본 데이터도 포함
@@ -265,7 +274,8 @@ class HBMDataCrawler:
                         "good_chips": len(good_chips),
                         "bad_chips": len(bad_chips),
                         "low_stock_count": len(bad_chips),
-                        "critical_stock_count": 0
+                        "critical_stock_count": 0,
+                        "by_failure_type": by_failure_type,
                     }
                 }
             
@@ -308,25 +318,27 @@ class HBMDataCrawler:
             }
     
     async def crawl_logs_data(self) -> Dict[str, Any]:
-        """로그 데이터 크롤링 (logs 페이지)"""
+        """로그 데이터 크롤링 - 웨이퍼처럼 실제 데이터 API 호출 (/log/list 전체 목록 + 통계)"""
         try:
             print("📋 Logs 데이터 크롤링 시작...")
             
-            # 로그 관련 API 엔드포인트 호출
-            logs_data = await self.fetch_api_data("/api/logs")
+            # 데이터 조회용 API: 전체 목록 + 일별/추세 통계 (프론트와 동일 소스)
+            logs_list = await self.fetch_api_data("/log/list")
+            daily_stats = await self.fetch_api_data("/log/stats/daily")
+            trend_data = await self.fetch_api_data("/log/stats/trend")
             
-            if logs_data is None:
-                # 데모 데이터 구조 반환
-                print("⚠️ API 데이터 없음, 데모 데이터 구조 반환")
-                logs_data = {
-                    "logs": [],
-                    "summary": {
-                        "total_logs": 0,
-                        "completed_count": 0,
-                        "failed_count": 0,
-                        "processing_count": 0
-                    }
-                }
+            if logs_list is None:
+                logs_list = []
+            if isinstance(logs_list, dict):
+                logs_list = logs_list.get("logs", logs_list.get("data", []))
+            if not isinstance(logs_list, list):
+                logs_list = []
+            
+            logs_data = {
+                "logs": logs_list,
+                "daily": daily_stats if isinstance(daily_stats, dict) else {},
+                "trend": trend_data if isinstance(trend_data, list) else (trend_data if isinstance(trend_data, dict) else []),
+            }
             
             # 데이터 정규화
             result = {
@@ -334,7 +346,7 @@ class HBMDataCrawler:
                 "source": "logs",
                 "data": logs_data,
                 "summary": {
-                    "total_logs": len(logs_data.get("logs", [])) if isinstance(logs_data, dict) else len(logs_data) if isinstance(logs_data, list) else 0,
+                    "total_logs": len(logs_list),
                     "crawled_at": datetime.now().isoformat()
                 }
             }
@@ -354,11 +366,11 @@ class HBMDataCrawler:
             }
     
     async def crawl_stacking_data(self) -> Dict[str, Any]:
-        """적층 구조 데이터 크롤링 (stacking 페이지)"""
+        """적층 데이터 크롤링 - 웨이퍼처럼 실제 데이터 API 호출 (스택 목록 + 최신 결과 상세)"""
         try:
             print("🔬 Stacking 데이터 크롤링 시작...")
             
-            # 1. 히스토리 목록 가져오기
+            # 데이터 조회용 API: 스택 이력 목록 + 최신 tsv 결과 전체
             history = await self.fetch_api_data("/stack/list")
             
             if not history or len(history) == 0:
@@ -385,11 +397,23 @@ class HBMDataCrawler:
             # 3. 최신 스택 결과 가져오기
             stack_result = await self.fetch_api_data(f"/stack/result/{latest_tsv_num}")
             
-            # 스택 개수 계산
+            # 스택 개수 및 품질 등급(A/B/C) 분포 계산
             total_stacks = 0
+            grade_a = 0
+            grade_b = 0
+            grade_c = 0
             if stack_result and isinstance(stack_result, dict):
                 stacks = stack_result.get("stacks", [])
-                total_stacks = len(stacks) if isinstance(stacks, list) else 0
+                if isinstance(stacks, list):
+                    total_stacks = len(stacks)
+                    for s in stacks:
+                        g = (s.get("final_grade") or s.get("score") or "").upper().strip()
+                        if g == "A":
+                            grade_a += 1
+                        elif g == "B":
+                            grade_b += 1
+                        elif g == "C":
+                            grade_c += 1
             
             # 데이터 정규화
             result = {
@@ -403,11 +427,14 @@ class HBMDataCrawler:
                     "total_history": len(history),
                     "latest_tsv_num": latest_tsv_num,
                     "total_stacks": total_stacks,
+                    "grade_a": grade_a,
+                    "grade_b": grade_b,
+                    "grade_c": grade_c,
                     "crawled_at": datetime.now().isoformat()
                 }
             }
             
-            print(f"✅ Stacking 데이터 크롤링 완료: {result['summary']['total_stacks']}개 스택")
+            print(f"✅ Stacking 데이터 크롤링 완료: {result['summary']['total_stacks']}개 스택 (A:{grade_a}, B:{grade_b}, C:{grade_c})")
             return result
             
         except Exception as e:
@@ -949,35 +976,19 @@ class HBMDataCrawler:
         try:
             print("📡 API 호출 방식으로 데이터 수집...")
             
-            # 1. 웨이퍼 목록 조회 (모든 페이지 수집)
+            # 1. 웨이퍼 목록 조회 (한 번에 전체 수집, 페이지 나누지 않음)
+            limit_one_request = 10000
+            wafer_list_response = await self.fetch_api_data(f"/wafer/list?page=1&limit={limit_one_request}")
+            
             all_wafers = []
-            page = 1
-            limit = 100  # 한 번에 많이 가져오기
-            total_wafers_count = 0
-            
-            while True:
-                wafer_list_response = await self.fetch_api_data(f"/wafer/list?page={page}&limit={limit}")
-                
-                if wafer_list_response is None or not isinstance(wafer_list_response, dict):
-                    print(f"⚠️ 페이지 {page} 데이터 없음")
-                    break
-                
-                wafers = wafer_list_response.get("wafers", [])
+            if wafer_list_response and isinstance(wafer_list_response, dict):
+                all_wafers = wafer_list_response.get("wafers", [])
                 total_wafers_count = wafer_list_response.get("total", 0)
-                
-                if not wafers:
-                    break
-                
-                all_wafers.extend(wafers)
-                print(f"📄 페이지 {page}: {len(wafers)}개 웨이퍼 수집 (전체: {len(all_wafers)}/{total_wafers_count})")
-                
-                # 다음 페이지가 없으면 중단
-                if len(all_wafers) >= total_wafers_count or len(wafers) < limit:
-                    break
-                
-                page += 1
+                print(f"📄 웨이퍼 한 번에 수집: {len(all_wafers)}개 (전체: {total_wafers_count}개)")
+            else:
+                print("⚠️ 웨이퍼 목록 응답 없음")
             
-            # 2. 통계 정보 조회
+            # 2. 통계 정보 조회 (실패해도 이미 수집한 목록으로 통계 계산 가능)
             stats_response = await self.fetch_api_data("/wafer/total_status")
             
             # 3. 데이터 변환 (프론트엔드 형식에 맞게)
@@ -1083,11 +1094,11 @@ class HBMDataCrawler:
             }
     
     async def crawl_all_dashboard_data(self) -> Dict[str, Any]:
-        """모든 dashboard 데이터 크롤링"""
+        """모든 dashboard 데이터 크롤링 (로그, 스택, 웨이퍼, 칩 재고)"""
         try:
             print("🚀 모든 Dashboard 데이터 크롤링 시작...")
             
-            # 모든 데이터를 병렬로 크롤링
+            # 4개 소스 병렬 크롤링 (inventory 포함)
             results = await asyncio.gather(
                 self.crawl_inventory_data(),
                 self.crawl_logs_data(),

@@ -407,6 +407,8 @@ def run_stacking_simulation_logic(batch_id, progress_callback=None):
     # DB Save
     stacks_result = []
     conn = get_conn()
+    if conn is None:
+        return {"error": "데이터베이스 연결에 실패했습니다.", "stacks": []}
     cur = conn.cursor()
     
     try:
@@ -654,6 +656,8 @@ def analyze_stack_stream():
 @stack_bp.route("/list", methods=["GET"])
 def list_history():
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor()
     try:
         # [원복] grouped_data를 직접 조회하여 모든 이력(1번 포함)이 나오도록 수정
@@ -688,6 +692,8 @@ def list_history():
 @stack_bp.route("/result/<int:tsv_num>", methods=["GET"])
 def get_result(tsv_num):
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor()
     try:
         # [수정] chip_data와 조인하여 원본 칩 생성 시간(created_at) 조회 + stack_yield 조회

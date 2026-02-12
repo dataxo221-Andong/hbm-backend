@@ -10,6 +10,12 @@ import time
 import threading
 from crawler_service import crawler
 
+# RAG: Engineer PDF 문서 검색 (engineer_doc 의도일 때만 사용)
+try:
+    import rag_service
+except ImportError:
+    rag_service = None
+
 # 프로젝트 루트 경로 설정 (wafer.py와 동일한 방식)
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -270,145 +276,126 @@ def find_stack_in_data(stack_ids, crawled_data):
 # 의도별 프롬프트 템플릿 (System Instructions + Few-shot Prompting)
 PROMPT_TEMPLATES = {
     "classification": {
-        "system": """당신은 웨이퍼 분류 및 분석 전문가입니다.
-현재 웨이퍼 모델링 페이지에서는 웨이퍼 이미지 분석, 불량 패턴 분류, Good/Bad Die 분류 등을 수행합니다.
+        "system": """[역할 설정]
+너는 반도체 전공정의 웨이퍼 맵 결함 패턴을 분석하는 AI 엔지니어링 전문가야. 사용자가 웨이퍼 분석 현황이나 특정 웨이퍼의 상태를 물어보면, 대시보드(웨이퍼 모델링 페이지)의 데이터를 기반으로 품질 등급과 공정 가이드를 제공해야 해. 불필요한 추측 없이 명시된 수치와 가이드만 전달해.
 
-주요 기능:
-- 웨이퍼 이미지 업로드 및 분석
-- 불량 패턴 자동 분류 (Edge-Ring, Center, Random 등)
-- Good Die / Bad Die 개수 계산
-- 신뢰도(Confidence) 기반 품질 등급 분류
-- 웨이퍼별 수율(Yield) 계산
+[데이터 분석 및 출력 가이드]
 
-답변 시 다음 정보를 우선적으로 활용하세요:
-1. 총 분석 웨이퍼 수: 완료된 웨이퍼 개수
-2. Good Die / Bad Die 통계: 전체 합계 및 웨이퍼별 개수
-3. 불량률: Bad Die / (Good Die + Bad Die) * 100
-4. 웨이퍼별 상세 정보: 신뢰도, 불량 패턴, 등급, 수율
+**1️⃣ 전체 분석 히스토리 요약** (포괄적 질문: "히스토리 요약", "웨이퍼 분석 결과 요약" 등)
+- **분석 규모**: 총 분석 웨이퍼 수(장), 추출 가능한 총 칩 수(개) 명시.
+- **품질 지표**: 제공된 통계 기준 평균 결함 밀도(%), 총 양품 칩(Good Die) 및 불량 칩(Bad Die) 현황 요약. 용어는 "추출 가능한 칩 수", "불량 칩 수", "결함 밀도" 사용.
+- **주요 패턴**: 발생 빈도가 높은 불량 유형(Random, Center, Edge-Loc 등) 분포를 리스트업하여 보고.
 
-데이터 처리 규칙:
-1. 특정 웨이퍼에 대한 정보 요청 시, 해당 웨이퍼의 데이터가 있으면 상세히 제공하세요
-2. 데이터가 없는 경우 해당 항목은 생략하고, 사용 가능한 데이터만 제공하세요
-3. 웨이퍼 ID나 Lot Name으로 검색 가능하도록 지원하세요
+**2️⃣ 특정 웨이퍼 상세 분석** (웨이퍼 ID 지정 시: "260207RBAIZ1020 웨이퍼 분석해줘" 등)
+- **진단 결과**: 해당 웨이퍼의 종합 등급(A/B/C/F), 결함 밀도(%), 분석 신뢰도(Confidence)% 출력.
+- **세부 현황**: 양품(Good Die) 개수, 불량(Bad Die) 개수 상세 명시. "추출 가능한 칩 수"는 양품+불량 합계.
+- **엔지니어 가이드**: 데이터에 '현상 분석' 또는 가이드 필드가 있으면 불량 원인·점검 공정을 한 줄로 제시. 없으면 불량 패턴(예: Center)에 따른 간단한 점검 방향만 언급.
 
-Few-shot 예시:
-질문: "총 분석된 웨이퍼는 몇 개인가요?"
-답변 단계:
-1단계: 데이터에서 총 웨이퍼 수 확인
-2단계: 완료된 웨이퍼(status="completed")만 카운트
-3단계: Good Die와 Bad Die 합계 계산
-답변: "총 분석된 웨이퍼는 {total_wafers}개입니다. Good Die는 {total_good}개, Bad Die는 {total_bad}개이며, 불량률은 {defect_rate}%입니다."
+**용어 (웨이퍼 모델링 페이지와 동일):** 총 분석 웨이퍼 수, 완료된 웨이퍼 수, 추출 가능한 칩 수, 불량 칩 수, 결함 밀도, 신뢰도, 불량 패턴, 등급. 임의의 값을 생성하지 말고 제공된 데이터만 사용하세요.
 
-질문: "{lot_name} 웨이퍼의 분석 결과는?"
-답변 단계:
-1단계: 해당 웨이퍼 데이터 검색
-2단계: 신뢰도, 불량 패턴, 등급 확인
-3단계: Good/Bad Die 개수 및 수율 계산
-답변: "{lot_name} 웨이퍼 분석 결과:\n- 신뢰도: {confidence}%\n- 불량 패턴: {failure_type}\n- 등급: {grade}\n- Good Die: {good}개, Bad Die: {bad}개\n- 수율: {yield}%"
-
-한국어로 전문적이고 정확한 답변을 제공하세요.""",
+**답변 톤:** 역할·자기 소개 금지. "AI 전문가로서", "엔지니어로서", "저는 ~입니다" 등 없이 바로 분석 내용·수치·가이드만 출력하세요.""",
         "temperature": 0.3
     },
     
     "yield": {
-        "system": """당신은 수율 데이터 분석 전문가입니다.
-현재 수율 로그 페이지에서는 생산 수율, 양품률, 불량률 추이 등을 모니터링합니다.
+        "system": """[역할 설정]
+너는 HBM(고대역폭 메모리) 생산 공정 데이터를 분석하는 전문 AI 조언자야. 제공된 **로그 데이터**(상단 KPI 및 배치 로그)를 바탕으로, 사용자가 현재 공정 상태를 한눈에 파악할 수 있도록 1) 지표 요약과 2) 핵심 인사이트를 중심으로 답변해야 해.
 
-주요 기능:
-- 실시간 수율 모니터링
-- 수율 트렌드 분석
-- 불량률 추이 분석
-- 생산 효율성 지표
+[데이터 추출 및 분석 가이드]
+- **상단 4대 지표(KPI)**: 제공된 데이터의 today(오늘)와 yesterday(어제) 값을 읽고, 어제 대비 증감·증감율을 계산해 해석해.
+- **생산 로그 테이블**: logs 배열에서 가장 최신 배치(Batch #tsv_num)와 이전 배치들의 total_stacks, avg_yield, grade_a, grade_b, grade_c를 비교해. 수율이나 A등급 비율이 꺾이는 배치를 찾아.
 
-답변 시 다음 정보를 우선적으로 활용하세요:
-1. 전체 수율: 평균 수율, 목표 수율 대비 현황
-2. 수율 추이: 일별/주별 수율 변화
-3. 불량률: 전체 불량률 및 불량 유형별 분포
-4. 개선 방안: 수율 향상을 위한 제안
+[답변 출력 형식] (반드시 아래 구조로 답변하세요)
 
-Few-shot 예시:
-질문: "현재 수율은 얼마인가요?"
-답변 단계:
-1단계: 최신 수율 데이터 확인
-2단계: 평균 수율 계산
-3단계: 목표 수율과 비교
-답변: "현재 평균 수율은 {avg_yield}%입니다. 목표 수율 {target_yield}% 대비 {difference}% {status}입니다."
+**1️⃣ 주요 지표 요약 (Summary)**
+- **일일 생산량**: [수치] Stacks ([어제 대비 증감율]) - 생산 속도에 대한 간단한 코멘트
+- **평균 수율**: [수치]% ([어제 대비 증감]) - 품질 안정성에 대한 코멘트
+- **A등급 비율**: [수치]% ([어제 대비 증감]) - 부가가치 및 등급 효율 코멘트
+- **사이클 타임**: [수치]min ([어제 대비 증감]) - 공정 속도 개선 여부
 
-한국어로 전문적이고 정확한 답변을 제공하세요.""",
+**2️⃣ 데이터 인사이트 (Insights)**
+- **최신 공정 상태**: "가장 최근인 Batch #[최신 tsv_num] 기준으로 수율은 [수치]%이며, 등급 분포는 A([개수]), B([개수]), C([개수])입니다."
+- **특이사항 발견**: "최근 배치 중 **Batch #[이슈 번호]**에서 [특정 지표(예: C등급, 수율)]가 일시적으로 증가/감소한 패턴이 보입니다." (해당 사항이 있을 때만)
+- **종합 평가**: (제공된 데이터를 종합하여 현재 공정이 순항 중인지, 특정 부분 모니터링이 필요한지 한 문장으로 결론)
+
+**중요:** 위에 제공된 실제 수치만 사용하세요. today, yesterday, logs 배열에 없는 값은 생성하지 마세요. 데이터가 없으면 "데이터 없음"으로 표기하세요.
+
+**금지:** "개별 수율 데이터가 없어", "수율 추이 비교 및 반복 불량 패턴 분석은 현재 제공이 어렵습니다", "전체 누적 데이터를 참고해 주십시오" 등 **없는 데이터나 미제공 분석을 언급하지 마세요.** 제공된 지표만 요약·인사이트로 보고하고, 없는 항목은 말하지 마세요.
+
+**답변 톤:** 역할·자기 소개 금지. "AI 전문가로서", "엔지니어로서", "저는 ~입니다" 등 없이 바로 지표 요약·인사이트만 출력하세요.""",
         "temperature": 0.4
     },
     
     "inventory": {
-        "system": """당신은 재고 관리 전문가입니다.
-현재 재고 관리 페이지에서는 HBM 스택, 칩, 부품 등의 재고 현황을 관리합니다.
+        "system": """[역할 설정]
+너는 HBM 적층 공정의 효율을 극대화하기 위해 칩 재고를 관리하고 최적의 투입 순서를 제안하는 **재고 최적화 AI 전문가**야.
 
-주요 기능:
-- 재고 현황 실시간 모니터링
-- 재고 부족 알림
-- 자동 발주 제안
-- 재고 이력 관리
+[데이터 분석 가이드]
+- **재고 총량 분석**: 제공된 전체 수량, 정상 칩(Good Die), 불량 칩(Bad Die) 데이터로 양품 비율·불량률을 보고해.
+- **재고율 기반 병목 진단**: 불량유형별 칩 수가 있으면, 개수가 **적은** 패턴은 '부족', **많은** 패턴은 '잉여'로 해석해. (대시보드 '불량유형별 재고밸런스'와 동일: 칩 적음 = 재고율 낮음 = 부족, 칩 많음 = 재고율 높음 = 잉여)
+- **AI 인사이트**: 부족 패턴(칩 적음)을 언급하고, 재고 전용(Reallocation) 추천은 "잉여 패턴(칩 많음) 칩을 우선 투입하여 부족 구간을 완화"하도록 한 문장으로 제안해.
 
-답변 시 다음 정보를 우선적으로 활용하세요:
-1. 재고 현황: 총 재고 수량, 카테고리별 분류
-2. 재고 부족: 임계값 이하 재고 항목
-3. 재고 이력: 최근 입출고 내역
-4. 발주 제안: 재고 부족 항목에 대한 발주 권장
+[답변 출력 형식] (아래 구조로 답변하세요)
 
-Few-shot 예시:
-질문: "현재 재고 현황은?"
-답변 단계:
-1단계: 전체 재고 데이터 확인
-2단계: 카테고리별 분류 및 수량 집계
-3단계: 재고 부족 항목 식별
-답변: "현재 재고 현황:\n- 총 재고 항목: {total_items}개\n- 재고 부족 항목: {low_stock}개\n- 주요 카테고리: {categories}"
+**📦 현재 칩 재고 현황**
+전체 수량: [수치]개 (정상: [수치] / 불량: [수치])
 
-한국어로 전문적이고 정확한 답변을 제공하세요.""",
+품질 상태: 현재 불량률은 **[수치]%**이며, 주요 불량 패턴은 **[패턴명]**입니다.
+
+**⚠️ 재고 밸런스 및 병목 구간**
+부족 패턴: [칩 수가 적은 패턴명] - 재고가 적어 생산 차질 우려. (데이터에 해당 패턴이 있으면)
+잉여 패턴: [칩 수가 많은 패턴명] - 재고가 여유로운 상태. (데이터에 해당 패턴이 있으면)
+
+**💡 AI 기반 생산 최적화 제안**
+생산 순서 조정: "[부족 패턴] 재고 부족 해결을 위해, 여유 있는 [잉여 패턴] 칩을 우선 투입하세요."
+기대 효과: 병목 구간 해소 및 공정 가동률 유지.
+
+**중요:** 제공된 실제 수치만 사용하세요. 데이터에 없는 재고율·패턴은 생성하지 마세요.
+
+**답변 톤:** 역할·자기 소개 금지. "AI 전문가로서", "엔지니어로서", "저는 ~입니다" 등 없이 바로 재고 현황·제안만 출력하세요.""",
         "temperature": 0.4
     },
     
     "stack": {
-        "system": """당신은 HBM 적층 구조 전문가입니다.
-현재 적층 구조 페이지에서는 3D 적층 기술, TSV 정렬, 적층 성공률 등을 분석합니다.
+        "system": """[역할]
+너는 HBM 생산 이력 및 적층 품질을 관리하는 AI 분석가야. 적층 구조 페이지에 표시되는 데이터(스택 ID, 품질 등급, 적층 케이스 수율, 레이어별 Chip ID·상태·불량유형·TSV 좌표 요약)만 사용하여 답변해. 화면에 없는 항목(TSV 정렬 정확도, 수율 상세 등)은 언급하지 마세요.
 
-**중요: HBM 스택 레이어 개수 규칙**
-HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표준입니다.
-**답변 시 레이어 개수를 명시적으로 언급하지 마세요.** 모든 HBM 스택이 항상 8개이므로 "총 8개 레이어로 구성되어 있습니다" 같은 문구는 불필요합니다.
+[분석 시나리오]
 
-주요 기능:
-- 3D 적층 구조 시각화
-- TSV(Through Silicon Via) 정렬 상태 확인
-- 적층 성공률 분석
-- 적층 공정 모니터링
+**1. 특정 스택/배치 언급 시** (예: "Batch 19 Stack 1 분석해줘", "STACK_DB_2_1 알려줘"):
+- 형식: [분석 대상] / [종합 등급(수율)] / [레이어 구성(정상/주의/불량)]을 순서대로 출력.
+- 핵심: '주의'나 '불량' 상태인 레이어의 **불량 유형**과 **TSV 결함 개수(또는 좌표 요약)**를 상세히 명시.
+- Chip ID 요청 시: 모든 레이어의 Chip ID와 상태·불량유형을 반드시 나열.
 
-답변 시 다음 정보를 우선적으로 활용하세요:
-1. 적층 구조: 레이어 수(항상 8개), Chip ID 목록, TSV 연결
-2. 각 레이어의 Chip ID: 반드시 모든 레이어의 Chip ID를 명시적으로 나열
-3. 적층 성공률: 성공/실패 비율
-4. TSV 정렬: 정렬 정확도, 오차 범위
-5. 공정 개선: 적층 성공률 향상 방안
+**2. 포괄적 요청 시** (예: "적층 분석", "최근 히스토리 어때?", "적층 구조"):
+- 대상: 별도 언급이 없다면 **가장 최신 배치(Batch #latest_tsv_num)**를 기준으로 요약.
+- 형식: [전체 수율 추이] / [등급 비중 변화(A n개, B n개, C n개)]만 요약하여 보고. [최근 반복되는 불량 패턴] 섹션은 출력하지 마세요.
+- 비교: 이전 배치 대비 품질이 개선되었는지, 하락했는지 **증감 수치**를 포함.
 
-**중요 규칙:**
-- 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 불필요합니다.
-- 레이어 표기는 영어로 "Layer 1", "Layer 2", "Layer 3" 형식으로 표시하세요. "DRAM 1" 또는 "레이어 1" 같은 표현은 사용하지 마세요.
-- 사용자가 "정보 알려줘"라고 요청하면, 핵심 정보만 간결하게 제공하세요. 불필요한 정보(TSV 상세 분석, 공정 개선 제안 등)는 포함하지 마세요.
-- 레이어 정보는 한 줄로 간결하게 표시하세요. 불필요한 줄바꿈을 피하세요.
-- 사용자가 "Chip ID를 알려달라", "사용된 chip id", "칩 ID", "칩 전부", "모든 칩", "전체 칩", "사용된 칩" 등을 요청하면, 반드시 모든 레이어의 Chip ID를 모두 나열하세요.
-- 일부만 보여주지 마세요. 반드시 모든 레이어를 나열하세요.
-- 각 칩의 상세 정보(상태, 불량유형)도 반드시 포함하세요.
-- 데이터에 chip_id 필드가 있으면 반드시 포함하여 답변하세요.
-- "Chip ID 정보는 제공되지 않습니다"라고 답변하지 마세요. 데이터에 있으면 반드시 제공하세요.
-- 답변은 반드시 완전하게 작성하세요. 중간에 끊기지 않도록 하세요.
+[답변 톤]
+- 엔지니어가 즉각 판단할 수 있도록 군더더기 없이 **수치 중심**으로 답변할 것.
+- 품질이 하락한 구간(예: 특정 Batch)은 **⚠️** 표시를 통해 강조할 것.
 
-Few-shot 예시:
-질문: "적층 구조는 어떻게 되어있나요?"
-답변 단계:
-1단계: 적층 구조 데이터 확인
-2단계: 층 수 및 다이 배치 분석
-3단계: TSV 연결 상태 확인
-답변: "현재 HBM 적층 구조는 {layers}층으로 구성되어 있으며, TSV 정렬 정확도는 {accuracy}%입니다."
+[기술 규칙]
+- HBM 스택은 항상 8개 레이어. 레이어 개수를 답변에 반복해 말하지 마세요.
+- 레이어 표기: "Layer 1", "Layer 2" 형식. "DRAM 1", "레이어 1" 사용하지 마세요.
+- 데이터에 있는 Chip ID·상태·불량유형·등급·수율만 사용하고, 없는 정보는 생성하지 마세요.
 
-한국어로 전문적이고 정확한 답변을 제공하세요.""",
+**답변 톤:** 역할·자기 소개 금지. "AI 전문가로서", "엔지니어로서", "저는 ~입니다" 등 없이 바로 분석·수치만 출력하세요.""",
         "temperature": 0.4
+    },
+
+    "engineer_doc": {
+        "system": """[역할]
+너는 엔지니어 문서(Engineer PDF)만을 참고하여 답변하는 AI 어시스턴트야.
+
+[규칙]
+- 아래 [참고 문서]에 있는 내용만 사용해서 답변해. 문서에 없는 내용은 추측하거나 만들지 마세요.
+- 문서에 정보가 없으면 "문서에 해당 내용이 없습니다"라고만 답하고, 다른 소스를 언급하지 마세요.
+- 답변은 간결하고 기술 문서 스타일로, 한국어로 작성하되 필요 시 영문 용어를 병기하세요.
+
+**답변 톤:** 역할·자기 소개 금지. "AI 전문가로서", "엔지니어로서" 등 없이 바로 문서 기반 내용만 출력하세요.""",
+        "temperature": 0.3
     },
     
     "general": {
@@ -444,7 +431,9 @@ StackVision은 HBM(High Bandwidth Memory) 제조 및 관리를 위한 기술 지
 중요 제약사항:
 - 실제 제공된 데이터나 문서에 없는 정보는 절대 생성하지 말 것
 - 확인할 수 없는 정보는 "확인 불가" 또는 "데이터 없음"으로 명시
-- 추측이나 가정에 기반한 답변 금지""",
+- 추측이나 가정에 기반한 답변 금지
+
+답변 톤: 역할·자기 소개 금지. "AI 전문가로서", "엔지니어로서", "저는 ~입니다" 등 없이 바로 요청한 내용·데이터만 출력하세요.""",
         "temperature": 0.5
     }
 }
@@ -477,8 +466,8 @@ def get_service_info(query_type):
 
 🔬 **HBM 적층 구조**
 - 3D 적층 구조 시각화
-- TSV 정렬 상태 확인
-- 적층 성공률 분석
+- 스택 품질 등급 및 레이어별 상태(정상/주의/불량)
+- 적층 케이스 수율
 
 📈 **수율 데이터**
 - 실시간 수율 모니터링
@@ -532,12 +521,13 @@ def analyze_intent_with_ai(user_input):
 1. "features" - 서비스 기능 안내 요청 (예: "기능이 뭐야", "무엇을 할 수 있어")
 2. "help" - 도움말 요청 (예: "도움말", "어떻게 사용하나요", "사용법")
 3. "about" - 서비스 소개 요청 (예: "회사 소개", "StackVision이 뭐야")
-4. "yield" - 수율 데이터 관련 질문 (예: "수율은?", "양품률", "생산률")
+4. "yield" - 수율/생산 로그 관련 질문 (예: "수율은?", "양품률", "생산률", "HBM 결과 로그", "로그 분석", "생산 로그")
 5. "inventory" - 재고 관리 관련 질문 (예: "재고 현황", "재고는 얼마나")
 6. "stack" - 적층 구조 관련 질문 (예: "적층 구조", "스택 정보", "HBM 적층")
-7. "classification" - 웨이퍼 분석/분류/통계 관련 질문 (예: "웨이퍼 분석", "총 웨이퍼 개수", "Good Die 개수", "불량률", "웨이퍼 등급")
+7. "classification" - 웨이퍼 분석/분류/통계 관련 질문 (예: "웨이퍼 분석", "총 웨이퍼 개수", "추출 가능한 칩 수", "불량 칩 수", "결함 밀도", "웨이퍼 등급")
 8. "hbm_info" - HBM 기술 정보 질문 (예: "TSV란", "HBM이 뭐야", "다이 설명")
-9. "general" - 일반적인 질문 (위에 해당하지 않는 모든 질문)
+9. "engineer_doc" - 엔지니어 문서/매뉴얼 기반 질문. 예: "엔지니어 문서에서", "매뉴얼", "센터 불량인데 어떤 조치를 해야해", "엣지 불량 대응 방법", "불량 유형별 조치" (문서에 나온 조치·대응 안내를 원하는 질문)
+10. "general" - 일반적인 질문 (위에 해당하지 않는 모든 질문)
 
 사용자 질문: "{user_input}"
 
@@ -549,6 +539,7 @@ def analyze_intent_with_ai(user_input):
 - 수율, 양품률을 묻는 질문은 "yield"
 - 적층 구조, 스택에 대한 질문은 "stack"
 - 재고 현황을 묻는 질문은 "inventory"
+- 불량 유형(센터, 엣지 등)에 따른 조치·대응·해결 방법을 묻는 질문은 "engineer_doc"으로 분류하세요.
 """
         
         # Gemini로 의도 분류 (낮은 temperature로 일관성 확보)
@@ -565,7 +556,7 @@ def analyze_intent_with_ai(user_input):
                 
                 # 유효한 의도인지 확인
                 valid_intents = ["features", "help", "about", "yield", "inventory", 
-                               "stack", "classification", "hbm_info", "general"]
+                               "stack", "classification", "hbm_info", "engineer_doc", "general"]
                 if intent in valid_intents:
                     print(f"🤖 AI 의도 분류: '{user_input}' -> {intent}")
                     return intent
@@ -589,9 +580,10 @@ def analyze_user_intent(user_input):
         "features": ["기능", "특징", "feature", "서비스", "뭐", "할수있", "가능", "기능소개"],
         "help": ["도움", "help", "어떻게", "방법", "문의", "문의사항", "사용법"],
         "about": ["소개", "about", "회사", "stackvision", "무엇", "소개해줘"],
-        "yield": ["수율", "yield", "양품률", "생산률"],
+        "yield": ["수율", "yield", "양품률", "생산률", "hbm 결과 로그", "결과 로그", "로그 분석", "로그 현황", "생산 로그"],
         "inventory": ["재고", "inventory", "stock", "현황"],
         "stack": ["적층", "stack", "hbm", "스택"],
+        "engineer_doc": ["엔지니어 문서", "엔지니어 매뉴얼", "engineer 문서", "engineer pdf", "매뉴얼", "엔지니어"],
     }
     
     for intent, keywords in quick_keywords.items():
@@ -641,58 +633,24 @@ def get_hbm_component_info(user_input):
 # 크롤링 데이터 캐시 관리
 # ==========================================
 
-def initialize_crawled_data():
-    """챗봇 초기화 시 자동으로 크롤링 실행 (모든 대시보드 데이터 수집)"""
-    global crawled_data_cache, cache_timestamp
-    
-    try:
-        print("\n" + "=" * 60)
-        print("🚀 [챗봇 초기화] 자동 크롤링 시작...")
-        print("=" * 60)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        # 모든 대시보드 데이터 크롤링 (wafermodeling, stacking, inventory, logs)
-        crawled_data_cache = loop.run_until_complete(crawler.crawl_all_dashboard_data())
-        cache_timestamp = time.time()
-        loop.close()
-        
-        if crawled_data_cache:
-            summary = crawled_data_cache.get('summary', {})
-            successful = summary.get('successful', 0)
-            total_sources = summary.get('total_sources', 0)
-            print(f"\n✅ [초기화 완료] {successful}/{total_sources}개 데이터 소스 수집 완료")
-            print(f"   → 수집된 데이터: wafermodeling, stacking, inventory, logs")
-            print("=" * 60 + "\n")
-        else:
-            print("\n⚠️ [초기화 실패] 크롤링 결과 없음")
-            print("=" * 60 + "\n")
-    except Exception as e:
-        print(f"\n❌ [초기화 오류] {e}")
-        print("=" * 60 + "\n")
-        import traceback
-        traceback.print_exc()
-        crawled_data_cache = None
-
 def get_crawled_data(force_refresh=False):
-    """캐시된 크롤링 데이터 가져오기 (필요시 갱신) - 모든 대시보드 데이터"""
+    """캐시된 데이터 가져오기 (필요시 갱신) - API로 4개 소스 한꺼번에 호출"""
     global crawled_data_cache, cache_timestamp
     
     with _cache_lock:
-        # 캐시가 없거나 만료되었거나 강제 갱신 요청 시
         current_time = time.time()
         cache_expired = (cache_timestamp is None or 
                         (current_time - cache_timestamp) > CACHE_DURATION)
         
         if crawled_data_cache is None or cache_expired or force_refresh:
             if force_refresh or cache_expired:
-                print("\n🔄 [캐시 갱신] 크롤링 데이터 갱신 중...")
+                print("\n🔄 [캐시 갱신] API로 데이터 갱신 중 (4개 소스 한꺼번에)...")
             else:
-                print("\n📊 [데이터 수집] 크롤링 데이터 수집 중...")
+                print("\n📊 [데이터 수집] 챗봇용 데이터 수집 중 (API 4개 한꺼번에)...")
             
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                # 모든 대시보드 데이터 크롤링 (wafermodeling, stacking, inventory, logs)
                 crawled_data_cache = loop.run_until_complete(crawler.crawl_all_dashboard_data())
                 cache_timestamp = time.time()
                 loop.close()
@@ -701,29 +659,19 @@ def get_crawled_data(force_refresh=False):
                     summary = crawled_data_cache.get('summary', {})
                     successful = summary.get('successful', 0)
                     total_sources = summary.get('total_sources', 0)
-                    print(f"✅ [수집 완료] {successful}/{total_sources}개 데이터 소스 수집 완료")
+                    print(f"✅ [수집 완료] {successful}/{total_sources}개 데이터 소스 수집 완료 (API)")
                     print(f"   → 수집된 데이터: wafermodeling, stacking, inventory, logs\n")
                 else:
-                    print("⚠️ [수집 실패] 크롤링 데이터 수집 결과 없음\n")
+                    print("⚠️ [수집 실패] 수집 결과 없음\n")
             except Exception as e:
-                print(f"❌ [수집 오류] 크롤링 데이터 수집 오류: {e}\n")
+                print(f"❌ [수집 오류] {e}\n")
                 import traceback
                 traceback.print_exc()
-                # 오류 시 기존 캐시 유지 (있는 경우)
         
         return crawled_data_cache
 
-def background_init():
-    """백그라운드에서 초기화 (서버 시작을 막지 않음)"""
-    time.sleep(2)  # 서버 시작 후 2초 대기
-    initialize_crawled_data()
-
-# 백그라운드 스레드로 초기화 시작
-init_thread = threading.Thread(target=background_init, daemon=True)
-init_thread.start()
-
 def clean_markdown_from_response(text):
-    """응답에서 불필요한 마크다운만 제거 (볼드와 특수 기호는 유지하여 가독성 향상)"""
+    """응답에서 불필요한 마크다운만 제거. 볼드(**텍스트**)는 유지하여 가독성 향상."""
     if not text:
         return text
     
@@ -733,10 +681,16 @@ def clean_markdown_from_response(text):
     # 마크다운 링크 제거 ([텍스트](URL) -> 텍스트)
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
     
-    # 인라인 코드는 유지 (가독성을 위해)
-    # 볼드(**텍스트**), 이탤릭(*텍스트*), 특수 기호는 모두 유지
+    # 볼드(**텍스트**)는 유지 → 프론트에서 굵게 표시
     
     return text
+
+def collapse_excessive_newlines(text):
+    """연속된 줄바꿈을 1개로 줄여 채팅 UI 가독성 향상 (줄 띄움 과다 방지)"""
+    if not text or not isinstance(text, str):
+        return text
+    # 2개 이상 연속 \n → \n (빈 줄 없이 줄바꿈만 1개)
+    return re.sub(r'\n{2,}', '\n', text).strip()
 
 def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None):
     """Gemini에게 보낼 향상된 프롬프트 생성 (System Instructions + Few-shot + Chain of Thought)"""
@@ -788,6 +742,9 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
             if found_wafer:
                 print(f"✅ 웨이퍼 찾음: {found_wafer.get('id') or found_wafer.get('lot_name')}")
                 import json
+                wm = found_wafer.get('waferMapData') or {}
+                _g, _b = wm.get('good', 0), wm.get('bad', 0)
+                _total_die = _g + _b if isinstance(_g, (int, float)) and isinstance(_b, (int, float)) else 'N/A'
                 # 찾은 웨이퍼 데이터를 명시적으로 포함
                 wafer_search_context = f"""
 **중요: 사용자가 요청한 특정 웨이퍼 정보**
@@ -795,13 +752,13 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 
 {json.dumps(found_wafer, ensure_ascii=False, indent=2)}
 
-위 웨이퍼의 다음 정보를 상세히 제공하세요:
+위 웨이퍼의 다음 정보를 상세히 제공하세요 (웨이퍼 모델링 페이지와 동일한 용어 사용):
 - 웨이퍼 ID / Lot Name: {found_wafer.get('id') or found_wafer.get('lot_name', 'N/A')}
 - 신뢰도: {found_wafer.get('confidence', 'N/A')}
 - 불량 패턴: {found_wafer.get('failure_type', 'N/A')}
 - 등급: {found_wafer.get('grade', 'N/A')}
-- Good Die: {found_wafer.get('waferMapData', {}).get('good', 'N/A')}개
-- Bad Die: {found_wafer.get('waferMapData', {}).get('bad', 'N/A')}개
+- 추출 가능한 칩 수: {_total_die}개
+- 불량 칩 수: {wm.get('bad', 'N/A')}개
 - 수율: {found_wafer.get('yield', 'N/A')}%
 - 상태: {found_wafer.get('status', 'N/A')}
 """
@@ -914,10 +871,15 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
             if filtered_stacks:
                 print(f"✅ 정상 레이어로만 구성된 스택 {len(filtered_stacks)}개 발견")
                 import json
+                # 등급별 개수 (전체 stack_list 기준)
+                grade_a = sum(1 for s in stack_list if (s.get('final_grade') or s.get('score') or '').upper().strip() == 'A')
+                grade_b = sum(1 for s in stack_list if (s.get('final_grade') or s.get('score') or '').upper().strip() == 'B')
+                grade_c = sum(1 for s in stack_list if (s.get('final_grade') or s.get('score') or '').upper().strip() == 'C')
                 stack_search_context = f"""
 **중요: 정상 레이어로만 구성된 스택 정보**
 
 총 {len(filtered_stacks)}개의 정상 레이어로만 적층된 스택을 찾았습니다.
+**전체 스택 품질 등급 분포: A {grade_a}개, B {grade_b}개, C {grade_c}개** (총 {len(stack_list)}개)
 
 **스택 목록:**
 """
@@ -1010,8 +972,9 @@ def create_enhanced_prompt(user_input, intent, messages=None, crawled_data=None)
 **⚠️ 매우 중요: 분석 요약 형식 규칙**
 - "분석 요약" 또는 "적층 분석 결과 요약" 섹션에는 반드시 다음 정보를 포함하세요:
   1. 스택 품질 등급
-  2. 적층 케이스 수율
-  3. 레이어 상태 분포 (정상 X개, 주의 X개, 불량 X개) - 위에 제공된 "레이어 상태 분포" 정보를 그대로 사용하세요
+  2. 스택 품질 등급 분포 (A n개, B n개, C n개) - 전체 적층에 대한 등급별 개수를 포함하세요
+  3. 적층 케이스 수율
+  4. 레이어 상태 분포 (정상 X개, 주의 X개, 불량 X개) - 위에 제공된 "레이어 상태 분포" 정보를 그대로 사용하세요
 
 **⚠️ 매우 중요: HBM 스택 레이어 개수 규칙**
 HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표준입니다.
@@ -1044,13 +1007,18 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 """
             else:
                 print(f"⚠️ 적층을 찾을 수 없음: {stack_ids}")
-                # 적층 목록 제공
+                # 적층 목록 제공 + 전체 등급 분포
                 if stack_list:
                     available_ids = [s.get("stack_id", "") for s in stack_list[:10]]
+                    ga = sum(1 for s in stack_list if (s.get('final_grade') or s.get('score') or '').upper().strip() == 'A')
+                    gb = sum(1 for s in stack_list if (s.get('final_grade') or s.get('score') or '').upper().strip() == 'B')
+                    gc = sum(1 for s in stack_list if (s.get('final_grade') or s.get('score') or '').upper().strip() == 'C')
                     stack_search_context = f"""
 **참고:** 요청하신 적층({', '.join(stack_ids)})을 찾을 수 없습니다.
 
-사용 가능한 적층 목록 (총 {len(stack_list)}개):
+전체 스택 품질 등급 분포: A {ga}개, B {gb}개, C {gc}개 (총 {len(stack_list)}개)
+
+사용 가능한 적층 목록:
 {', '.join([s for s in available_ids if s])}
 """
     
@@ -1094,7 +1062,8 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                         completed_count = summary.get('completed_count', len([w for w in wafers_list if w.get('status') == 'completed']))
                         total_good_die = statistics.get('total_good_die', 0)
                         total_bad_die = statistics.get('total_bad_die', 0)
-                        defect_rate = statistics.get('defect_rate', 0)
+                        total_die = total_good_die + total_bad_die  # 추출 가능한 칩 수 (웨이퍼 모델링 페이지와 동일)
+                        defect_rate = statistics.get('defect_rate', 0)  # 결함 밀도 %
                         
                         # 데이터가 없을 때 경고
                         if total_wafers == 0 and len(wafers_list) == 0:
@@ -1105,9 +1074,9 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 **통계 정보:**
 - 총 분석 웨이퍼 수: 0개 (데이터베이스에 웨이퍼 데이터가 없습니다)
 - 완료된 웨이퍼 수: 0개
-- 총 Good Die: 0개
-- 총 Bad Die: 0개
-- 불량률: 0%
+- 추출 가능한 칩 수: 0개
+- 불량 칩 수: 0개
+- 결함 밀도: 0%
 
 **참고:** 현재 데이터베이스에 저장된 웨이퍼 데이터가 없습니다.
 """
@@ -1115,12 +1084,12 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                             data_summary = f"""
 **실제 데이터베이스에서 조회한 웨이퍼 데이터:**
 
-**통계 정보 (반드시 이 값을 사용하세요 - 실제 DB 값입니다):**
+**통계 정보 (반드시 이 값을 사용하세요 - 웨이퍼 모델링 페이지와 동일한 용어):**
 - 총 분석 웨이퍼 수: {total_wafers}개
 - 완료된 웨이퍼 수: {completed_count}개
-- 총 Good Die: {total_good_die:,}개
-- 총 Bad Die: {total_bad_die:,}개
-- 불량률: {defect_rate}%
+- 추출 가능한 칩 수: {total_die:,}개
+- 불량 칩 수: {total_bad_die:,}개
+- 결함 밀도: {defect_rate}%
 
 **웨이퍼 목록:** 총 {len(wafers_list)}개
 """
@@ -1135,7 +1104,8 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                                     failure_type = w.get('failure_type', 'N/A')
                                     good_die = w.get('waferMapData', {}).get('good', 0)
                                     bad_die = w.get('waferMapData', {}).get('bad', 0)
-                                    data_summary += f"- {wafer_id}: 수율 {yield_val}%, 등급 {grade}, 불량 패턴 {failure_type}, Good Die {good_die}개, Bad Die {bad_die}개\n"
+                                    total_wafer_die = good_die + bad_die
+                                    data_summary += f"- {wafer_id}: 수율 {yield_val}%, 등급 {grade}, 불량 패턴 {failure_type}, 추출 가능한 칩 수 {total_wafer_die}개, 불량 칩 수 {bad_die}개\n"
                                 
                                 # 불량 패턴별 통계 추가
                                 failure_type_counts = {}
@@ -1174,7 +1144,8 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                                             grade = w.get('grade', 'N/A')
                                             good_die = w.get('waferMapData', {}).get('good', 0)
                                             bad_die = w.get('waferMapData', {}).get('bad', 0)
-                                            data_summary += f"{i+1}. {wafer_id} (수율: {yield_val}%, 등급: {grade}, Good: {good_die}개, Bad: {bad_die}개)\n"
+                                            total_wafer_die = good_die + bad_die
+                                            data_summary += f"{i+1}. {wafer_id} (수율: {yield_val}%, 등급: {grade}, 추출 가능한 칩 수: {total_wafer_die}개, 불량 칩 수: {bad_die}개)\n"
                                         
                                         if len(filtered_wafers) > max_show:
                                             data_summary += f"\n... 외 {len(filtered_wafers) - max_show}개 웨이퍼 더 있음\n"
@@ -1193,6 +1164,67 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                     import json
                     print(f"🔍 [DEBUG] crawled_data 전체: {json.dumps(crawled_data, ensure_ascii=False, indent=2)[:1000]}")
                     data_summary = "\n**참고:** 현재 데이터베이스에 웨이퍼 데이터가 없거나, 크롤러가 데이터를 가져오지 못했습니다."
+            
+            # yield(수율/로그) 의도일 때 HBM 결과 로그 KPI + 배치 데이터 특별 처리
+            elif intent == "yield":
+                logs_source = None
+                if isinstance(crawled_data, dict) and "logs" in crawled_data:
+                    logs_source = crawled_data.get("logs", {})
+                if isinstance(logs_source, dict) and logs_source.get("data"):
+                    log_data = logs_source.get("data", {})
+                    daily = log_data.get("daily", {}) or {}
+                    today = daily.get("today", {}) or {}
+                    yesterday = daily.get("yesterday", {}) or {}
+                    logs_list = log_data.get("logs", [])
+                    if not isinstance(logs_list, list):
+                        logs_list = []
+                    # 어제 대비 증감 계산
+                    def _pct_chg(curr, prev):
+                        if prev is None or prev == 0:
+                            return "N/A"
+                        try:
+                            return f"{((float(curr or 0) - float(prev)) / float(prev) * 100):+.1f}%"
+                        except (TypeError, ZeroDivisionError):
+                            return "N/A"
+                    def _diff(curr, prev, fmt="{:.1f}"):
+                        try:
+                            c, p = float(curr or 0), float(prev or 0)
+                            return fmt.format(c - p) if fmt else str(c - p)
+                        except (TypeError, ValueError):
+                            return "N/A"
+                    tp_t, tp_y = today.get("total_production"), yesterday.get("total_production")
+                    ay_t, ay_y = today.get("avg_yield"), yesterday.get("avg_yield")
+                    ar_t, ar_y = today.get("grade_a_ratio"), yesterday.get("grade_a_ratio")
+                    ac_t, ac_y = today.get("avg_cycle"), yesterday.get("avg_cycle")
+                    data_summary = f"""
+**HBM 결과 로그 - 상단 KPI (실제 데이터)**
+
+**오늘(today):**
+- 일일 생산량(total_production): {tp_t} Stacks
+- 평균 수율(avg_yield): {ay_t}%
+- A등급 비율(grade_a_ratio): {ar_t}%
+- 사이클 타임(avg_cycle): {ac_t}min
+
+**어제(yesterday):**
+- 일일 생산량: {tp_y} Stacks
+- 평균 수율: {ay_y}%
+- A등급 비율: {ar_y}%
+- 사이클 타임: {ac_y}min
+
+**어제 대비 증감:** 일일생산량 {_pct_chg(tp_t, tp_y)}, 수율 {_diff(ay_t, ay_y, '{:+.1f}%p')}, A등급비율 {_diff(ar_t, ar_y, '{:+.1f}%p')}, 사이클타임 {_diff(ac_t, ac_y, '{:+.1f}')}min
+
+**최근 배치 로그 (Batch = tsv_num):**
+"""
+                    for h in (logs_list[:15] if logs_list else []):
+                        tn = h.get("tsv_num", "N/A")
+                        ts = h.get("total_stacks", h.get("stack_count", 0))
+                        ay = h.get("avg_yield", 0)
+                        ga, gb, gc = h.get("grade_a", 0), h.get("grade_b", 0), h.get("grade_c", 0)
+                        data_summary += f"- Batch #{tn}: 생산 {ts} Stacks, 평균수율 {ay}%, A({ga}) B({gb}) C({gc})\n"
+                    if not logs_list:
+                        data_summary += "- (배치 데이터 없음)\n"
+                else:
+                    data_summary = "\n**참고:** 로그(수율) 데이터가 없습니다. 데이터베이스 연결 또는 크롤러 상태를 확인하세요."
             
             # inventory 의도일 때 재고 데이터 특별 처리
             elif intent == "inventory":
@@ -1216,6 +1248,26 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                     good_chips = summary.get("good_chips", 0)
                     bad_chips = summary.get("bad_chips", 0)
                     
+                    # 불량유형별 칩 수: summary.by_failure_type 우선, 없으면 items/chips에서 집계
+                    failure_type_counts = {}
+                    if isinstance(summary.get("by_failure_type"), dict) and summary["by_failure_type"]:
+                        failure_type_counts = dict(summary["by_failure_type"])
+                    else:
+                        source_list = items if items else chips
+                        for it in (source_list or []):
+                            is_bad = it.get("die_status") == 0 or it.get("die_status") == "0" or it.get("status") == "불량"
+                            if not is_bad:
+                                continue
+                            ft = (it.get("failure_type") or it.get("failureType") or "None")
+                            key = ft if isinstance(ft, str) and ft.strip() else "None"
+                            failure_type_counts[key] = failure_type_counts.get(key, 0) + 1
+                    failure_type_line = ""
+                    if failure_type_counts:
+                        sorted_ft = sorted(failure_type_counts.items(), key=lambda x: -x[1])
+                        failure_type_line = "\n**불량유형(패턴)별 칩 수 (부족/잉여 판단 참고):**\n" + "\n".join(
+                            f"- {k}: {v:,}개" for k, v in sorted_ft
+                        ) + "\n"
+                    
                     data_summary = f"""
 **실제 데이터베이스에서 조회한 재고 데이터:**
 
@@ -1224,7 +1276,7 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 - 정상 칩 (Good Die): {good_chips:,}개
 - 불량 칩 (Bad Die): {bad_chips:,}개
 - 재고 부족 항목: {summary.get('low_stock_count', 0)}개
-
+{failure_type_line}
 **재고 항목 목록:** 총 {len(items)}개 항목
 """
                     if items and len(items) > 0:
@@ -1293,7 +1345,7 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
                         data_summary = "\n**참고:** 크롤링된 데이터가 없습니다."
             
             if data_summary:
-                data_context = f"\n\n**실제 시스템 데이터 (데이터베이스에서 조회한 실제 값입니다):**{data_summary}\n\n**중요:** 위에 제공된 통계 정보(총 웨이퍼 수, Good Die, Bad Die 등)는 실제 데이터베이스에서 조회한 정확한 값입니다. 반드시 이 값을 사용하여 답변하세요. 임의의 값을 생성하거나 추측하지 마세요. 타임스탬프나 수집 시간 정보는 답변에 포함하지 마세요."
+                data_context = f"\n\n**실제 시스템 데이터 (데이터베이스에서 조회한 실제 값입니다):**{data_summary}\n\n**중요:** 위 통계는 웨이퍼 모델링 페이지와 동일한 용어입니다. 답변 시 '추출 가능한 칩 수', '불량 칩 수', '결함 밀도'를 사용하세요. 임의의 값을 생성하지 마세요. 타임스탬프나 수집 시간은 답변에 포함하지 마세요."
         except Exception as e:
             print(f"크롤링 데이터 파싱 오류: {e}")
             import traceback
@@ -1316,7 +1368,7 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 - 레이어 정보는 각 레이어마다 한 줄로 표시하세요. 레이어 간에는 줄바꿈 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요.
 - 사용자가 "정보 알려줘"라고 요청하면, 핵심 정보만 간결하게 제공하세요. 불필요한 정보(TSV 상세 분석, 공정 개선 제안 등)는 포함하지 마세요.
 - **⚠️ 절대적으로 중요: 모든 레이어의 정보를 완전히 나열한 후에 답변을 마무리하세요. 답변이 중간에 끊기면 안 됩니다. Chip ID가 길어도 중간에 끊지 마세요.**
-- 섹션 헤더(■)와 내용 사이에는 빈 줄 1개만 사용하세요. 불필요한 빈 줄은 사용하지 마세요.
+- 섹션 헤더(■)와 내용 사이에는 빈 줄 1개만 사용하세요. 연속된 빈 줄(줄바꿈 3개 이상)은 사용하지 마세요. 문단 사이에도 빈 줄은 1개만 넣으세요.
 - 숫자는 천 단위 구분 표시를 사용하세요 (예: 63,911개, 23,249개)
 - 통계나 수치는 한 줄에 하나씩 표시하세요
 - 리스트나 항목은 줄바꿈으로 명확히 구분하세요
@@ -1348,11 +1400,12 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 사용자 질문: {user_input}
 
 **중요 지시사항 (반드시 읽고 따르세요):**
-위의 "실제 시스템 데이터" 섹션을 먼저 확인하세요. 그 섹션에 "총 분석 웨이퍼 수" 또는 "통계 정보"가 있다면, 그 값이 실제 데이터베이스에서 조회한 정확한 값입니다.
+위의 "실제 시스템 데이터" 섹션을 먼저 확인하세요. 웨이퍼 관련 답변은 웨이퍼 모델링 페이지와 동일한 용어를 사용하세요.
 
-- "총 웨이퍼 개수" 또는 "웨이퍼 개수" 질문: 위의 "총 분석 웨이퍼 수" 값을 정확히 사용하세요
-- "Good Die 개수" 질문: 위의 "총 Good Die" 값을 정확히 사용하세요
-- "Bad Die 개수" 질문: 위의 "총 Bad Die" 값을 정확히 사용하세요
+- "총 웨이퍼 개수" 또는 "웨이퍼 개수" 질문: 위의 "총 분석 웨이퍼 수" 값을 사용하세요
+- "추출 가능한 칩 수" / "칩 수" 질문: 위의 "추출 가능한 칩 수" 값을 사용하세요 (Good Die가 아님)
+- "불량 칩 수" 질문: 위의 "불량 칩 수" 값을 사용하세요 (Bad Die가 아님)
+- "결함 밀도" 질문: 위의 "결함 밀도"(%) 값을 사용하세요
 - 위에 명시된 숫자가 있으면 반드시 그 숫자를 사용하세요
 - 임의의 값을 생성하거나 추측하지 마세요
 - 데이터에 없는 정보는 생성하지 마세요
@@ -1368,7 +1421,7 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 6. 숫자는 천 단위 구분 표시를 사용하세요 (예: 63,911개, 23,249개)
 7. 타임스탬프나 수집 시간 정보는 답변에 포함하지 마세요
 8. 절대로 임의의 값을 생성하지 마세요. 위에 제공된 실제 데이터만 사용하세요
-9. "총 분석 웨이퍼 수" 값이 0개로 표시되어 있으면, "현재 데이터베이스에 웨이퍼 데이터가 없습니다"라고 답변하세요
+9. "총 분석 웨이퍼 수"가 0개이면 "현재 데이터베이스에 웨이퍼 데이터가 없습니다"라고 답변하세요. 웨이퍼 통계는 반드시 "추출 가능한 칩 수", "불량 칩 수", "결함 밀도" 용어로 표기하세요
 10. 가독성을 위해 마크다운 문법(**볼드**, *이탤릭* 등)과 특수 기호(•, →, ✓, ■ 등)를 적절히 활용하세요
 11. HBM 스택은 항상 8개 레이어로 구성됩니다. 레이어 개수를 답변에 명시적으로 언급하지 마세요. 모든 HBM 스택이 항상 8개이므로 "총 8개 레이어로 구성되어 있습니다" 같은 문구는 불필요합니다
 12. 레이어 표기는 영어로 "Layer 1", "Layer 2", "Layer 3" 형식으로 표시하세요. "DRAM 1" 또는 "레이어 1" 같은 표현은 사용하지 마세요
@@ -1379,11 +1432,22 @@ HBM 스택은 항상 8개 레이어로 구성됩니다. 이것은 HBM 제조 표
 17. **⚠️ 마지막 레이어까지 반드시 완전히 표시하세요. Chip ID가 길어도 중간에 끊지 마세요.**
 18. **적층 분석 결과를 제공할 때, "분석 요약" 또는 "적층 분석 결과 요약" 섹션에는 반드시 다음 정보를 포함하세요:**
     - 스택 품질 등급
+    - **스택 품질 등급 분포 (A n개, B n개, C n개)** - 데이터에 grade_a, grade_b, grade_c 또는 등급별 개수가 있으면 반드시 포함하세요
     - 적층 케이스 수율
     - 레이어 상태 분포 (정상 X개, 주의 X개, 불량 X개) - 위에 제공된 "레이어 상태 분포" 정보가 있으면 반드시 포함하세요
+19. **프론트엔드 적층 페이지에 표시되지 않는 데이터(TSV 정렬, 수율 상세 등)를 "문의해 주시기 바랍니다" 등으로 안내하는 문구를 사용하지 마세요. 챗봇은 화면에 실제로 보여주는 정보만 언급하세요.**
 """
     
     return enhanced_prompt, temperature
+
+@chatbot_bp.route("/chat/preload", methods=["GET"])
+def chat_preload():
+    """챗봇 열 때 호출: 캐시가 없거나 5분 지났으면 수집, 아니면 기존 캐시 유지"""
+    try:
+        get_crawled_data()  # force_refresh 없음 → 5분 TTL만 적용
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @chatbot_bp.route("/chat", methods=["POST", "GET"])
 def chat():
@@ -1416,6 +1480,7 @@ def chat():
             if service_response:
                 # 마크다운 문법 제거
                 service_response = clean_markdown_from_response(service_response)
+                service_response = collapse_excessive_newlines(service_response)
                 return jsonify({
                     "message": {
                         "role": "assistant",
@@ -1428,10 +1493,44 @@ def chat():
             hbm_response = get_hbm_component_info(user_input)
             # 마크다운 문법 제거
             hbm_response = clean_markdown_from_response(hbm_response)
+            hbm_response = collapse_excessive_newlines(hbm_response)
             return jsonify({
                 "message": {
                     "role": "assistant",
                     "content": hbm_response
+                }
+            })
+
+        # 엔지니어 문서 RAG: 크롤링 없이 PDF 기반 답변만
+        elif intent == "engineer_doc":
+            rag_context = ""
+            if rag_service:
+                try:
+                    rag_context = rag_service.get_context(user_input)
+                except Exception as e:
+                    print(f"[RAG] 오류: {e}")
+            if not rag_context:
+                response = "Engineer 문서가 등록되지 않았거나 검색할 수 없습니다. 관리자에게 **ENGINEER_PDF_PATH** 설정 또는 **data/Engineer.pdf** 파일을 요청하세요."
+            else:
+                template = PROMPT_TEMPLATES.get("engineer_doc", PROMPT_TEMPLATES["general"])
+                system_instruction = template["system"]
+                temperature = template.get("temperature", 0.3)
+                enhanced_prompt = f"""{system_instruction}
+
+[참고 문서]
+{rag_context}
+
+[사용자 질문]
+{user_input}"""
+                response = get_gemini_response(enhanced_prompt, temperature=temperature)
+            if not response or response.startswith("[오류]"):
+                response = "Engineer 문서 검색 중 일시 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            response = clean_markdown_from_response(response)
+            response = collapse_excessive_newlines(response)
+            return jsonify({
+                "message": {
+                    "role": "assistant",
+                    "content": response
                 }
             })
         
@@ -1439,13 +1538,24 @@ def chat():
         # 캐시에서 데이터 가져오기 (없으면 자동으로 크롤링)
         crawled_data = get_crawled_data()
         
-        # 다른 의도들(yield, inventory, stack)은 필요시 추가 크롤링
-        if intent in ["yield", "inventory", "stack"]:
+        # 의도별 추가 API 호출은 캐시에 해당 데이터가 없거나 에러일 때만 (DB 부하/타임아웃 방지)
+        cache_key = {"yield": "logs", "inventory": "inventory", "stack": "stacking"}.get(intent, intent)
+        cached = (crawled_data or {}).get(cache_key) if isinstance(crawled_data, dict) else None
+        need_additional = (
+            intent in ["yield", "inventory", "stack"]
+            and (
+                not isinstance(crawled_data, dict)
+                or cache_key not in crawled_data
+                or not isinstance(cached, dict)
+                or cached.get("error") is not None
+                or cached.get("data") is None
+            )
+        )
+        if need_additional:
             try:
-                print(f"📊 [{intent}] 추가 데이터 크롤링 시작...")
+                print(f"📊 [{intent}] 캐시 보강을 위해 API 호출...")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                
                 if intent == "yield":
                     additional_data = loop.run_until_complete(crawler.crawl_logs_data())
                 elif intent == "inventory":
@@ -1454,25 +1564,14 @@ def chat():
                     additional_data = loop.run_until_complete(crawler.crawl_stacking_data())
                 else:
                     additional_data = None
-                
                 loop.close()
-                
-                # 추가 데이터가 있으면 crawled_data에 병합 (새로운 캐시 구조에 맞게)
-                if additional_data:
+                if additional_data and additional_data.get("data") is not None:
                     if crawled_data is None:
                         crawled_data = {}
-                    # 새로운 캐시 구조에 맞게 저장
-                    # intent가 "yield"인 경우 "logs"로, "stack"인 경우 "stacking"으로 매핑
-                    cache_key = {
-                        "yield": "logs",
-                        "inventory": "inventory",
-                        "stack": "stacking"
-                    }.get(intent, intent)
                     crawled_data[cache_key] = additional_data
-                    print(f"✅ [{intent}] 추가 데이터 크롤링 완료 (캐시 키: {cache_key})")
-            except Exception as crawl_error:
-                print(f"⚠️ [{intent}] 추가 데이터 크롤링 오류: {crawl_error}")
-                # 오류가 있어도 기본 웨이퍼 데이터는 사용 가능
+                    print(f"✅ [{intent}] 보강 완료 (캐시 키: {cache_key})")
+            except Exception as fetch_error:
+                print(f"⚠️ [{intent}] 추가 API 오류: {fetch_error}")
         
         # 일반적인 질문은 Gemini에게 전달 (향상된 프롬프트 사용)
         enhanced_prompt, temperature = create_enhanced_prompt(user_input, intent, messages, crawled_data)
@@ -1493,8 +1592,9 @@ def chat():
 웨이퍼, TSV, 적층, 수율 등의 키워드를 입력해보세요!
             """
         
-        # 마크다운 문법 제거
+        # 마크다운 문법 제거 후 연속 줄바꿈 정리
         response = clean_markdown_from_response(response)
+        response = collapse_excessive_newlines(response)
         
         return jsonify({
             "message": {
@@ -1519,8 +1619,9 @@ def chat():
 💡 기본 도움말:
 "도움", "기능", "수율", "재고", "적층" 등을 입력해보세요!
         """
-        # 마크다운 문법 제거
+        # 마크다운 문법 제거 후 연속 줄바꿈 정리
         error_response = clean_markdown_from_response(error_response)
+        error_response = collapse_excessive_newlines(error_response)
         return jsonify({
             "message": {
                 "role": "assistant",

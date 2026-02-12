@@ -377,6 +377,8 @@ def analyze_wafer(lot_name):
 
         # 3. DB 저장 (기존 테이블 wafer_data에 저장 - 호환성 유지)
         conn = get_conn()
+        if conn is None:
+            return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
         cur = conn.cursor()
         try:
             # wafer_data 테이블 (Snake Case 컬럼 매핑)
@@ -511,6 +513,8 @@ def get_wafer_result(lot_name):
     [3단계] 분석 결과 조회 (기존 로직)
     """
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor(pymysql.cursors.DictCursor)
     try:
         cur.execute("SELECT * FROM wafer_data WHERE lot_name = %s", (lot_name,))
@@ -534,6 +538,8 @@ def get_wafer_list():
     offset = (page - 1) * limit
     
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor(pymysql.cursors.DictCursor)
     try:
         # 1. 전체 개수 조회
@@ -580,6 +586,8 @@ def get_total_status():
     - 결함 밀도 = (불량 칩 수 / 추출 가능한 칩 수) * 100
     """
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor(pymysql.cursors.DictCursor)
     try:
         # 1. 총 웨이퍼 수
@@ -623,72 +631,70 @@ def get_total_status():
         conn.close()
 
 # ==========================================
-# CSV 내보내기 API
+# Excel 내보내기 API
 # ==========================================
 @wafer_bp.route("/export", methods=["GET"])
 def export_wafer_data():
-    """wafer_data 테이블을 CSV 파일로 내보내기"""
+    """wafer_data 테이블을 Excel(.xlsx) 파일로 내보내기"""
+    cur = None
+    conn = None
     try:
         conn = get_conn()
+        if conn is None:
+            return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
         cur = conn.cursor(pymysql.cursors.DictCursor)
-        
-        # wafer_data 테이블 전체 조회
+
         query = """
-            SELECT lot_name, failure_type, confidence, die_count, defect_count, 
+            SELECT lot_name, failure_type, confidence, die_count, defect_count,
                    defect_density, total_grade, created_at
-            FROM wafer_data 
+            FROM wafer_data
             ORDER BY created_at DESC
         """
         cur.execute(query)
         rows = cur.fetchall()
-        
+
         if not rows:
             return jsonify({"error": "No data to export"}), 404
-        
-        # CSV 생성
+
         import io
-        import csv
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # 헤더 작성
-        headers = ["Lot Name", "Failure Type", "Confidence", "Die Count", 
-                   "Defect Count", "Defect Density", "Grade", "Created At"]
-        writer.writerow(headers)
-        
-        # 데이터 작성
+        import pandas as pd
+
+        # DataFrame 생성
+        data = []
         for row in rows:
-            writer.writerow([
-                row['lot_name'],
-                row['failure_type'],
-                f"{row['confidence']:.4f}" if row['confidence'] else "",
-                row['die_count'],
-                row['defect_count'],
-                f"{row['defect_density']:.6f}" if row['defect_density'] else "",
-                row['total_grade'],
-                row['created_at'].strftime('%Y-%m-%d %H:%M:%S') if row['created_at'] else ""
-            ])
-        
-        # CSV 데이터 가져오기
-        csv_data = output.getvalue()
-        output.close()
-        
-        # 파일명 생성 (현재 날짜시간 포함)
+            data.append({
+                "Lot Name": row["lot_name"],
+                "Failure Type": row["failure_type"] or "",
+                "Confidence": f"{row['confidence']:.4f}" if row.get("confidence") is not None else "",
+                "Die Count": row["die_count"],
+                "Defect Count": row["defect_count"],
+                "Defect Density": f"{row['defect_density']:.6f}" if row.get("defect_density") is not None else "",
+                "Grade": row["total_grade"] or "",
+                "Created At": row["created_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("created_at") else "",
+            })
+        df = pd.DataFrame(data)
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Wafer Data")
+        buffer.seek(0)
+        xlsx_data = buffer.getvalue()
+
         now = datetime.datetime.now()
-        filename = f"wafer_data_{now.strftime('%Y%m%d_%H%M%S')}.csv"
-        
-        # Response 생성
+        filename = f"wafer_data_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
+
         from flask import make_response
-        response = make_response(csv_data)
+        response = make_response(xlsx_data)
         response.headers["Content-Disposition"] = f"attachment; filename={filename}"
-        response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"  # UTF-8 BOM for Excel
-        
+        response.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
         return response
 
     except Exception as e:
         print(f"[Error] /export: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()

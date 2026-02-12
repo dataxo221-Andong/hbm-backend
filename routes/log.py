@@ -7,6 +7,8 @@ log_bp = Blueprint("log", __name__, url_prefix="/log")
 @log_bp.route("/list", methods=["GET"])
 def list_history():
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor()
     try:
         # simulation_log 테이블을 조회하여 시뮬레이션 이력 목록 반환
@@ -53,6 +55,8 @@ def list_history():
 @log_bp.route("/stats/daily", methods=["GET"])
 def get_daily_stats():
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor()
     try:
         # 1. DB에 존재하는 가장 최근 날짜 조회 (SQL에게 위임)
@@ -166,6 +170,8 @@ def get_daily_stats():
 @log_bp.route("/stats/trend", methods=["GET"])
 def get_stats_trend():
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor()
     try:
         # 최근 10회차 시뮬레이션의 수율 및 등급 분포 추세 조회
@@ -222,6 +228,8 @@ def get_stats_trend():
 @log_bp.route("/detail/<int:tsv_num>", methods=["GET"])
 def get_batch_detail(tsv_num):
     conn = get_conn()
+    if conn is None:
+        return jsonify({"error": "데이터베이스 연결에 실패했습니다."}), 503
     cur = conn.cursor()
     try:
         # grouped_data 테이블에서 해당 배치의 적층 케이스 상세 조회
