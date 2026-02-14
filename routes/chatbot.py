@@ -10,16 +10,16 @@ import time
 import threading
 from crawler_service import crawler
 
+# 프로젝트 루트 경로 설정 (wafer.py와 동일) — rag_service import 전에 필요
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 # RAG: Engineer PDF 문서 검색 (engineer_doc 의도일 때만 사용)
 try:
     import rag_service
 except ImportError:
     rag_service = None
-
-# 프로젝트 루트 경로 설정 (wafer.py와 동일한 방식)
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
 chatbot_bp = Blueprint("chatbot", __name__)
 
